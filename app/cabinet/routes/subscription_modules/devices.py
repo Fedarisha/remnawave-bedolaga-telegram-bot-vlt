@@ -44,6 +44,15 @@ def _resolve_panel_uuid(subscription: Subscription | None, user: User) -> str | 
     return user.remnawave_uuid
 
 
+async def _resolve_min_device_limit(db: AsyncSession, subscription: Subscription) -> int:
+    """Return the lowest device limit a user may reduce to."""
+    if subscription.tariff_id:
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
+        if tariff and tariff.device_limit and tariff.device_limit > 0:
+            return tariff.device_limit
+    return 1
+
+
 @router.post('/devices')
 async def purchase_devices_legacy(
     request: DevicePurchaseRequest,
@@ -1046,10 +1055,7 @@ async def get_device_reduction_info(
             'connected_devices_count': 0,
         }
 
-    # Minimum device limit for decrease is always 1 (tariff's device_limit is the
-    # number of devices included at purchase, not the floor for decrease)
-    min_device_limit = 1
-
+    min_device_limit = await _resolve_min_device_limit(db, subscription)
     current_device_limit = subscription.device_limit or 1
 
     # Can't reduce below minimum
@@ -1129,10 +1135,7 @@ async def reduce_devices(
             detail='Device reduction is not available for trial subscriptions',
         )
 
-    # Minimum device limit for decrease is always 1 (tariff's device_limit is the
-    # number of devices included at purchase, not the floor for decrease)
-    min_device_limit = 1
-
+    min_device_limit = await _resolve_min_device_limit(db, subscription)
     current_device_limit = subscription.device_limit or 1
 
     # Validate new limit
