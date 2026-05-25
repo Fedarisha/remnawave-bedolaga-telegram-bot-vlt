@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # Cabinet (Personal Account) routes
+from app.cabinet.apple_iap import apple_iap_only_router
 from app.cabinet.routes import router as cabinet_router
 from app.cabinet.routes.info import public_router as public_info_router
 from app.config import settings
@@ -172,7 +175,7 @@ OPENAPI_TAGS = [
 ]
 
 
-def create_web_api_app() -> FastAPI:
+def create_web_api_app(lifespan: Any = None) -> FastAPI:
     docs_config = settings.get_web_api_docs_config()
 
     # Убираем openapi_tags для предотвращения ошибок при генерации openapi.json
@@ -184,6 +187,7 @@ def create_web_api_app() -> FastAPI:
         openapi_url=docs_config.get('openapi_url'),
         swagger_ui_parameters={'persistAuthorization': True},
         redirect_slashes=False,
+        lifespan=lifespan,
     )
 
     add_redoc_endpoint(
@@ -282,5 +286,7 @@ def create_web_api_app() -> FastAPI:
     if settings.is_cabinet_enabled():
         app.include_router(public_info_router)
         app.include_router(cabinet_router)
+    elif settings.is_apple_iap_enabled():
+        app.include_router(apple_iap_only_router)
 
     return app
