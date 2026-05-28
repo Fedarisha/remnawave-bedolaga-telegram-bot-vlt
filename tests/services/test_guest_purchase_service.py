@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -74,3 +75,83 @@ async def test_fulfill_purchase_keeps_gift_pending_activation_for_existing_subsc
     assert notify_mock.await_args.kwargs['is_pending_activation'] is True
     admin_notify_mock.assert_awaited_once()
     nalogo_mock.assert_awaited_once()
+
+
+async def test_fulfill_daily_purchase_marks_initial_daily_charge(monkeypatch):
+    monkeypatch.setattr(
+        type(guest_purchase_service.settings),
+        'is_multi_tariff_enabled',
+        lambda self: False,
+        raising=False,
+    )
+
+    purchase = SimpleNamespace(
+        id=7,
+        token='daily-token',
+        status=GuestPurchaseStatus.PAID.value,
+        tariff_id=2,
+        period_days=7,
+        amount_kopeks=8400,
+        payment_method='yookassa',
+        payment_id='payment-id',
+        is_gift=False,
+        contact_type='email',
+        contact_value='dima_petru92@mail.ru',
+        gift_recipient_type=None,
+        gift_recipient_value=None,
+        cabinet_password=None,
+        buyer=None,
+        landing=None,
+        user=None,
+        subid=None,
+        subscription_url=None,
+        subscription_crypto_link=None,
+        receipt_uuid=None,
+    )
+    user = SimpleNamespace(
+        id=237,
+        language='ru',
+        auth_type='telegram',
+    )
+    tariff = SimpleNamespace(
+        id=2,
+        name='Суточный',
+        is_daily=True,
+        allowed_squads=['squad-a'],
+        traffic_limit_gb=100,
+        device_limit=1,
+        get_effective_price=lambda period_days: 8400 if period_days == 7 else None,
+    )
+    subscription = SimpleNamespace(
+        id=234,
+        end_date=datetime.now(UTC) + timedelta(days=7),
+        subscription_url='https://sub.example/daily',
+        subscription_crypto_link='vless://daily',
+        last_daily_charge_at=None,
+        is_daily_paused=True,
+    )
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_DummyResult(purchase))
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    service_mock = MagicMock()
+    service_mock.create_remnawave_user = AsyncMock()
+
+    monkeypatch.setattr(guest_purchase_service, '_find_or_create_user', AsyncMock(return_value=(user, False)))
+    monkeypatch.setattr(guest_purchase_service, 'get_tariff_by_id', AsyncMock(return_value=tariff))
+    monkeypatch.setattr(guest_purchase_service, 'get_subscription_by_user_id', AsyncMock(return_value=None))
+    monkeypatch.setattr(guest_purchase_service, 'create_paid_subscription', AsyncMock(return_value=subscription))
+    monkeypatch.setattr(guest_purchase_service, 'SubscriptionService', lambda: service_mock)
+    monkeypatch.setattr(guest_purchase_service, 'create_transaction', AsyncMock())
+    monkeypatch.setattr(guest_purchase_service, 'send_guest_notification', AsyncMock())
+    monkeypatch.setattr(guest_purchase_service, '_send_admin_notification', AsyncMock())
+    monkeypatch.setattr(guest_purchase_service, '_create_nalogo_receipt_for_purchase', AsyncMock())
+
+    result = await guest_purchase_service.fulfill_purchase(db, purchase.token)
+
+    assert result is purchase
+    assert purchase.status == GuestPurchaseStatus.DELIVERED.value
+    assert subscription.last_daily_charge_at is not None
+    assert subscription.is_daily_paused is False

@@ -2498,7 +2498,11 @@ async def try_resume_disabled_daily_after_topup(
     Returns True if the subscription was successfully resumed and charged.
     """
     from app.cabinet.routes.websocket import notify_user_subscription_renewed
-    from app.database.crud.subscription import get_subscription_by_user_id, update_daily_charge_time
+    from app.database.crud.subscription import (
+        get_subscription_by_user_id,
+        has_unexpired_paid_time,
+        update_daily_charge_time,
+    )
 
     if not user or not getattr(user, 'id', None):
         return False
@@ -2547,6 +2551,34 @@ async def try_resume_disabled_daily_after_topup(
 
     tariff = getattr(subscription, 'tariff', None)
     if not tariff:
+        return False
+
+    if has_unexpired_paid_time(subscription):
+        previous_status = subscription.status
+        subscription.status = SubscriptionStatus.ACTIVE.value
+        if subscription.last_daily_charge_at is None:
+            subscription.last_daily_charge_at = datetime.now(UTC)
+        try:
+            await db.commit()
+            await db.refresh(subscription)
+        except Exception as error:
+            logger.error(
+                '❌ Авто-возобновление daily: ошибка активации предоплаченной подписки',
+                format_user_id=_format_user_id(user),
+                error=error,
+                exc_info=True,
+            )
+            await db.rollback()
+            return False
+
+        logger.info(
+            '✅ Авто-возобновление daily: подписка → ACTIVE без списания, оплаченный период ещё активен',
+            format_user_id=_format_user_id(user),
+            previous_status=previous_status,
+            subscription_id=subscription.id,
+            end_date=subscription.end_date,
+        )
+        # No money was charged, so let the post-topup pipeline continue to a saved cart purchase.
         return False
 
     raw_daily_price = getattr(tariff, 'daily_price_kopeks', 0)

@@ -17,6 +17,7 @@ from app.database.crud.subscription import (
     get_daily_subscriptions_for_charge,
     get_disabled_daily_subscriptions_for_resume,
     get_expired_daily_subscriptions_for_recovery,
+    has_unexpired_paid_time,
     suspend_daily_subscription_insufficient_balance,
     update_daily_charge_time,
 )
@@ -656,6 +657,21 @@ class DailySubscriptionService:
                     disabled_subs = await get_disabled_daily_subscriptions_for_resume(db)
                     for subscription in disabled_subs:
                         try:
+                            if has_unexpired_paid_time(subscription):
+                                subscription.status = SubscriptionStatus.ACTIVE.value
+                                if subscription.last_daily_charge_at is None:
+                                    subscription.last_daily_charge_at = datetime.now(UTC)
+                                await db.commit()
+
+                                logger.info(
+                                    '✅ Суточная подписка возобновлена без списания: оплаченный период ещё активен',
+                                    subscription_id=subscription.id,
+                                    user_id=subscription.user_id,
+                                    end_date=subscription.end_date,
+                                )
+                                stats['resumed'] += 1
+                                continue
+
                             # Только активируем — НЕ ставим last_daily_charge_at,
                             # чтобы _process_single_charge корректно его обновил при списании.
                             # Если списание упадёт, подписка останется без last_daily_charge_at

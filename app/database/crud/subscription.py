@@ -80,6 +80,19 @@ def is_active_paid_subscription(subscription: Subscription | None) -> bool:
     )
 
 
+def has_unexpired_paid_time(subscription: Subscription | None, now: datetime | None = None) -> bool:
+    """Return True when a subscription still has prepaid time left."""
+    if not subscription or subscription.end_date is None:
+        return False
+
+    current_time = now or datetime.now(UTC)
+    end_date = subscription.end_date
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=UTC)
+
+    return end_date > current_time
+
+
 async def get_subscription_by_user_id(db: AsyncSession, user_id: int) -> Subscription | None:
     """Get primary subscription for user.
 
@@ -2041,6 +2054,7 @@ async def get_daily_subscriptions_for_charge(db: AsyncSession) -> list[Subscript
     - Тариф подписки суточный (is_daily=True)
     - Подписка активна
     - Подписка не приостановлена пользователем
+    - Оплаченный период уже закончился
     - Прошло более 24 часов с последнего списания (или списания ещё не было)
     """
     from app.database.models import Tariff
@@ -2064,6 +2078,8 @@ async def get_daily_subscriptions_for_charge(db: AsyncSession) -> list[Subscript
                 User.status == UserStatus.ACTIVE.value,
                 Subscription.is_daily_paused.is_(False),
                 Subscription.is_trial.is_(False),  # Не списываем с триальных подписок
+                # Не списываем с предоплаченного суточного периода раньше end_date.
+                Subscription.end_date <= now,
                 # Списания ещё не было ИЛИ прошло более 24 часов
                 ((Subscription.last_daily_charge_at.is_(None)) | (Subscription.last_daily_charge_at < one_day_ago)),
             )

@@ -5,8 +5,11 @@ import app.services.subscription_auto_purchase_service as auto_purchase_module
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database.models import User
-from app.services.subscription_auto_purchase_service import auto_purchase_saved_cart_after_topup
+from app.database.models import SubscriptionStatus, User
+from app.services.subscription_auto_purchase_service import (
+    auto_purchase_saved_cart_after_topup,
+    try_resume_disabled_daily_after_topup,
+)
 from app.services.subscription_purchase_service import (
     PurchaseDevicesConfig,
     PurchaseOptionsContext,
@@ -24,6 +27,44 @@ class DummyTexts:
 
     def format_price(self, value: int) -> str:
         return f'{value / 100:.0f} ₽'
+
+
+async def test_resume_disabled_daily_with_prepaid_time_does_not_charge(monkeypatch):
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False, raising=False)
+
+    user = MagicMock(spec=User)
+    user.id = 237
+    user.telegram_id = None
+
+    subscription = MagicMock()
+    subscription.id = 234
+    subscription.user_id = user.id
+    subscription.status = SubscriptionStatus.DISABLED.value
+    subscription.is_daily_tariff = True
+    subscription.is_trial = False
+    subscription.is_daily_paused = False
+    subscription.tariff = MagicMock(daily_price_kopeks=1200, name='Суточный')
+    subscription.end_date = datetime.now(UTC) + timedelta(days=6)
+    subscription.last_daily_charge_at = None
+
+    monkeypatch.setattr(
+        'app.database.crud.subscription.get_subscription_by_user_id',
+        AsyncMock(return_value=subscription),
+    )
+    subtract_mock = AsyncMock()
+    create_transaction_mock = AsyncMock()
+    monkeypatch.setattr(auto_purchase_module, 'subtract_user_balance', subtract_mock)
+    monkeypatch.setattr(auto_purchase_module, 'create_transaction', create_transaction_mock)
+
+    db_session = AsyncMock(spec=AsyncSession)
+
+    result = await try_resume_disabled_daily_after_topup(db_session, user)
+
+    assert result is False
+    assert subscription.status == SubscriptionStatus.ACTIVE.value
+    assert subscription.last_daily_charge_at is not None
+    subtract_mock.assert_not_awaited()
+    create_transaction_mock.assert_not_awaited()
 
 
 async def test_auto_purchase_saved_cart_after_topup_success(monkeypatch):

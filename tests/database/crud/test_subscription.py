@@ -1,7 +1,28 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from app.database.crud import subscription as subscription_crud
 from app.database.crud.subscription import create_trial_subscription
+
+
+class _EmptyScalarResult:
+    def all(self):
+        return []
+
+
+class _EmptyResult:
+    def scalars(self):
+        return _EmptyScalarResult()
+
+
+async def test_get_daily_subscriptions_for_charge_waits_until_prepaid_period_ends():
+    db = Mock()
+    db.execute = AsyncMock(return_value=_EmptyResult())
+
+    await subscription_crud.get_daily_subscriptions_for_charge(db)
+
+    statement = str(db.execute.await_args.args[0])
+    assert 'subscriptions.end_date <= :end_date_1' in statement
 
 
 async def test_create_trial_subscription_uses_all_available_squads_by_default(monkeypatch):
