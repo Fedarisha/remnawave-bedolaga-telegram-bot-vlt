@@ -23,7 +23,7 @@ from app.database.crud.subscription import (
 )
 from app.database.crud.tariff import get_tariff_by_id
 from app.database.crud.transaction import create_transaction
-from app.database.crud.user import _get_or_create_default_promo_group
+from app.database.crud.user import _get_or_create_default_promo_group, create_unique_referral_code
 from app.database.models import (
     GuestPurchase,
     GuestPurchaseStatus,
@@ -658,6 +658,13 @@ def _mask_email(email: str) -> str:
     return f'{local}@{domain}.{tld}'
 
 
+async def _ensure_referral_code(db: AsyncSession, user: User) -> None:
+    """Ensure guest-created users can invite referrals later."""
+    if user.referral_code:
+        return
+    user.referral_code = await create_unique_referral_code(db)
+
+
 async def _find_or_create_user(
     db: AsyncSession,
     contact_type: Literal['email', 'telegram'],
@@ -700,6 +707,7 @@ async def _find_or_create_user(
             if not user.promo_group_id:
                 default_group = await _get_or_create_default_promo_group(db)
                 user.promo_group_id = default_group.id
+            await _ensure_referral_code(db, user)
             return user, is_new_account
 
         # Create new email user with verified cabinet account
@@ -719,6 +727,7 @@ async def _find_or_create_user(
             email_verified_at=datetime.now(UTC),
             password_hash=hash_password(plain_password),
             promo_group_id=resolved_group.id,
+            referral_code=await create_unique_referral_code(db),
         )
         if purchase:
             purchase.cabinet_password = plain_password
@@ -746,6 +755,7 @@ async def _find_or_create_user(
                 if not user.promo_group_id:
                     default_group = await _get_or_create_default_promo_group(db)
                     user.promo_group_id = default_group.id
+                await _ensure_referral_code(db, user)
                 return user, is_new_account
             raise
         logger.info(
@@ -814,6 +824,7 @@ async def _find_or_create_user(
         if not user.promo_group_id:
             default_group = await _get_or_create_default_promo_group(db)
             user.promo_group_id = default_group.id
+        await _ensure_referral_code(db, user)
         return user, False
 
     # Create new telegram user
@@ -823,6 +834,7 @@ async def _find_or_create_user(
         username=username,
         telegram_id=resolved_telegram_id,
         promo_group_id=default_group.id,
+        referral_code=await create_unique_referral_code(db),
     )
     try:
         async with db.begin_nested():
@@ -836,6 +848,7 @@ async def _find_or_create_user(
                 if not user.promo_group_id:
                     default_group = await _get_or_create_default_promo_group(db)
                     user.promo_group_id = default_group.id
+                await _ensure_referral_code(db, user)
                 return user, False
         result = await db.execute(select(User).where(func.lower(User.username) == normalized))
         user = result.scalars().first()
@@ -843,6 +856,7 @@ async def _find_or_create_user(
             if not user.promo_group_id:
                 default_group = await _get_or_create_default_promo_group(db)
                 user.promo_group_id = default_group.id
+            await _ensure_referral_code(db, user)
             return user, False
         raise
     logger.info(

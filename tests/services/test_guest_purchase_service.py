@@ -22,8 +22,50 @@ class _DummyResult:
         return _DummyScalars(self._item)
 
 
+class _AsyncContext:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+async def test_find_or_create_email_guest_user_generates_referral_code(monkeypatch):
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_DummyResult(None))
+    db.flush = AsyncMock()
+    db.begin_nested = MagicMock(return_value=_AsyncContext())
+    db.add = MagicMock()
+
+    monkeypatch.setattr(
+        guest_purchase_service,
+        '_get_or_create_default_promo_group',
+        AsyncMock(return_value=SimpleNamespace(id=1)),
+    )
+    monkeypatch.setattr(
+        guest_purchase_service,
+        'create_unique_referral_code',
+        AsyncMock(return_value='refGuest1'),
+    )
+
+    user, is_new_account = await guest_purchase_service._find_or_create_user(
+        db,
+        'email',
+        'new-user@example.com',
+    )
+
+    assert is_new_account is True
+    assert user.referral_code == 'refGuest1'
+    db.add.assert_called_once_with(user)
+
+
 async def test_fulfill_purchase_keeps_gift_pending_activation_for_existing_subscription_in_multi_mode(monkeypatch):
-    monkeypatch.setattr(type(guest_purchase_service.settings), 'is_multi_tariff_enabled', lambda self: True, raising=False)
+    monkeypatch.setattr(
+        type(guest_purchase_service.settings),
+        'is_multi_tariff_enabled',
+        lambda self: True,
+        raising=False,
+    )
 
     purchase = SimpleNamespace(
         id=1,

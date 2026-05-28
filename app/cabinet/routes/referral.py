@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
+from app.database.crud.user import create_unique_referral_code
 from app.database.models import (
     AdvertisingCampaign,
     ReferralEarning,
@@ -35,12 +36,26 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix='/referral', tags=['Cabinet Referral'])
 
 
+async def _ensure_referral_code(db: AsyncSession, user: User) -> None:
+    """Backfill referral code for users created before referral-code generation was enforced."""
+    if user.referral_code:
+        return
+
+    user.referral_code = await create_unique_referral_code(db)
+    await db.commit()
+    await db.refresh(user)
+
+    logger.info('Referral code backfilled for cabinet user', user_id=user.id, referral_code=user.referral_code)
+
+
 @router.get('', response_model=ReferralInfoResponse)
 async def get_referral_info(
     user: User = Depends(get_current_cabinet_user),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
     """Get referral program info for current user."""
+    await _ensure_referral_code(db, user)
+
     # Get total referrals count
     total_query = select(func.count()).select_from(User).where(User.referred_by_id == user.id)
     total_result = await db.execute(total_query)
