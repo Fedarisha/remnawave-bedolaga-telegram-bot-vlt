@@ -422,6 +422,7 @@ class Settings(BaseSettings):
     NALOGO_PROXY_URL: str | None = None  # SOCKS proxy for nalog.ru; falls back to PROXY_URL if not set
 
     AUTO_PURCHASE_AFTER_TOPUP_ENABLED: bool = False
+    AUTO_EXTEND_EXPIRED_AFTER_TOPUP_ENABLED: bool = False
 
     # Отключение превью ссылок в сообщениях бота
     DISABLE_WEB_PAGE_PREVIEW: bool = False
@@ -1616,6 +1617,15 @@ class Settings(BaseSettings):
 
     def is_auto_purchase_after_topup_enabled(self) -> bool:
         value = getattr(self, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', False)
+
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            return normalized in {'1', 'true', 'yes', 'on'}
+
+        return bool(value)
+
+    def is_auto_extend_expired_after_topup_enabled(self) -> bool:
+        value = getattr(self, 'AUTO_EXTEND_EXPIRED_AFTER_TOPUP_ENABLED', False)
 
         if isinstance(value, str):
             normalized = value.strip().lower()

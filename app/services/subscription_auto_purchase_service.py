@@ -2125,6 +2125,9 @@ async def try_auto_extend_expired_after_topup(
     from app.cabinet.routes.websocket import notify_user_subscription_renewed
     from app.database.crud.subscription import get_subscription_by_user_id
 
+    if not settings.is_auto_extend_expired_after_topup_enabled():
+        return False
+
     if not user or not getattr(user, 'id', None):
         return False
 
