@@ -3,6 +3,7 @@
 import math
 import time
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from urllib.parse import quote
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -50,6 +51,22 @@ from ..schemas.balance import (
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/balance', tags=['Cabinet Balance'])
+
+
+def _safe_cabinet_return_to(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.strip()
+    if not value.startswith('/') or value.startswith('//'):
+        return None
+    return value
+
+
+def _get_payment_return_to(record: PendingPayment) -> str | None:
+    metadata = getattr(record.payment, 'metadata_json', None)
+    if not isinstance(metadata, dict):
+        return None
+    return _safe_cabinet_return_to(metadata.get('return_to'))
 
 
 @router.get('', response_model=BalanceResponse)
@@ -346,6 +363,9 @@ async def create_topup(
     payment_url = None
     payment_id = None
     cabinet_return_url = f'{settings.CABINET_URL.rstrip("/")}/balance/top-up/result?method={request.payment_method}'
+    safe_return_to = _safe_cabinet_return_to(request.return_to)
+    if safe_return_to:
+        cabinet_return_url = f'{cabinet_return_url}&returnTo={quote(safe_return_to, safe="")}'
     cabinet_success_url = f'{cabinet_return_url}&status=success'
     cabinet_failed_url = f'{cabinet_return_url}&status=failed'
 
@@ -360,6 +380,8 @@ async def create_topup(
                 'receipt_email': receipt_email,
                 'receipt_language': getattr(user, 'language', None) or settings.DEFAULT_LANGUAGE,
             }
+            if safe_return_to:
+                yookassa_metadata['return_to'] = safe_return_to
 
             # Use payment_option to select card or sbp (default: card)
             option = (request.payment_option or '').strip().lower()
@@ -1292,6 +1314,7 @@ def _record_to_response(record: PendingPayment) -> PendingPaymentResponse:
         created_at=record.created_at,
         expires_at=record.expires_at,
         payment_url=_get_payment_url(record),
+        return_to=_get_payment_return_to(record),
         user_id=record.user.id if record.user else None,
         user_telegram_id=record.user.telegram_id if record.user else None,
         user_username=record.user.username if record.user else None,

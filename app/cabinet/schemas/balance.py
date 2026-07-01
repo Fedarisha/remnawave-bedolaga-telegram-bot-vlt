@@ -70,6 +70,7 @@ class TopUpRequest(BaseModel):
     payment_method: str = Field(..., description='Payment method ID')
     payment_option: str | None = Field(None, description='Payment option (e.g. Platega method code)')
     email: EmailStr = Field(..., description='Email for fiscal receipt')
+    return_to: str | None = Field(None, description='Cabinet path to continue after successful top-up')
 
 
 class TopUpResponse(BaseModel):
@@ -114,6 +115,7 @@ class PendingPaymentResponse(BaseModel):
     created_at: datetime
     expires_at: datetime | None = None
     payment_url: str | None = None
+    return_to: str | None = None
     user_id: int | None = None
     user_telegram_id: int | None = None
     user_username: str | None = None
