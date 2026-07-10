@@ -568,6 +568,10 @@ async def execute_merge(
             secondary_id=secondary.id,
         )
 
+    # Persist identity transfers before SELECT FOR UPDATE refreshes the ORM objects.
+    # Otherwise populate_existing can reload old DB values and drop pending transfers.
+    await db.flush()
+
     # 4. Суммируем баланс (включая отрицательный — долг не должен исчезать)
     transferred_kopeks = secondary.balance_kopeks
     if transferred_kopeks != 0:

@@ -468,6 +468,38 @@ class TestExecuteMergeBalance:
 
         assert result.balance_kopeks == 5000
 
+    async def test_flushes_identity_transfers_before_balance_lock(self, monkeypatch):
+        from app.database import models as db_models
+        from app.database.crud import user as user_crud
+
+        class FakeUser(SimpleNamespace):
+            pass
+
+        db = _make_db()
+        primary = FakeUser(**vars(_make_user(id=1, balance_kopeks=5000)))
+        secondary = FakeUser(**vars(_make_user(id=2, telegram_id=99999, balance_kopeks=3000)))
+        monkeypatch.setattr(db_models, 'User', FakeUser)
+        monkeypatch.setattr(
+            account_merge_service,
+            'get_user_by_id',
+            AsyncMock(side_effect=[primary, secondary]),
+        )
+
+        async def fake_lock(_db, user):
+            if user.id == primary.id:
+                assert db.flush.await_count >= 2
+            return user
+
+        monkeypatch.setattr(user_crud, 'lock_user_for_update', fake_lock)
+
+        with _patch_remnawave_delete():
+            result = await execute_merge(db, 1, 2)
+
+        assert result.telegram_id == 99999
+        assert result.balance_kopeks == 8000
+        assert secondary.telegram_id is None
+        assert secondary.balance_kopeks == 0
+
 
 class TestExecuteMergePartnerStatus:
     async def test_higher_priority_transferred(self, monkeypatch):
@@ -628,7 +660,7 @@ class TestExecuteMergeSecondaryDeleted:
         with _patch_remnawave_delete():
             await execute_merge(db, 1, 2)
 
-        db.flush.assert_awaited_once()
+        assert db.flush.await_count == 2
 
 
 # ---------------------------------------------------------------------------
