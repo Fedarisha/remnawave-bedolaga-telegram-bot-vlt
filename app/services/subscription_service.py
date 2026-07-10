@@ -276,11 +276,6 @@ class SubscriptionService:
             try:
                 existing = await api.get_user_by_uuid(subscription.remnawave_uuid)
                 if existing:
-                    try:
-                        await api.reset_user_devices(existing.uuid)
-                    except Exception as hwid_error:
-                        logger.warning('⚠️ Не удалось сбросить HWID', hwid_error=hwid_error)
-
                     updated = await api.update_user(uuid=existing.uuid, **common_kwargs)
                     if reset_traffic:
                         await self._reset_user_traffic(api, updated.uuid, user, reset_reason)
@@ -373,12 +368,6 @@ class SubscriptionService:
                 '🔄 Найден существующий пользователь в панели для', _format_user_log=self._format_user_log(user)
             )
             remnawave_user = existing_users[0]
-
-            try:
-                await api.reset_user_devices(remnawave_user.uuid)
-                logger.info('🔧 Сброшены HWID устройства для', _format_user_log=self._format_user_log(user))
-            except Exception as hwid_error:
-                logger.warning('⚠️ Не удалось сбросить HWID', hwid_error=hwid_error)
 
             updated_user = await api.update_user(uuid=remnawave_user.uuid, **common_kwargs)
             if reset_traffic:
