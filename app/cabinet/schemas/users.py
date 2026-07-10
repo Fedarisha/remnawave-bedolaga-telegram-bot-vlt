@@ -2,9 +2,9 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 class UserStatusEnum(StrEnum):
@@ -384,6 +384,81 @@ class UpdateRestrictionsResponse(BaseModel):
     restriction_topup: bool
     restriction_subscription: bool
     restriction_reason: str | None = None
+    message: str
+
+
+class UpdateUserEmailRequest(BaseModel):
+    """Request to set or clear user email from admin panel."""
+
+    email: EmailStr | None = Field(None, description='New email address, or null to clear')
+    email_verified: bool = Field(default=False, description='Mark email as verified by admin override')
+
+
+class UpdateUserEmailResponse(BaseModel):
+    """Response after user email update."""
+
+    success: bool
+    old_email: str | None = None
+    new_email: str | None = None
+    email_verified: bool = False
+    message: str
+
+
+class AdminAccountMergePreviewSubscription(BaseModel):
+    """Subscription preview for admin account merge."""
+
+    status: str
+    is_trial: bool
+    end_date: datetime | None = None
+    traffic_limit_gb: float = 0
+    traffic_used_gb: float = 0
+    device_limit: int = 0
+    tariff_name: str | None = None
+    autopay_enabled: bool = False
+
+
+class AdminAccountMergePreviewUser(BaseModel):
+    """User preview for admin account merge."""
+
+    id: int
+    username: str | None = None
+    first_name: str | None = None
+    email: str | None = None
+    auth_methods: list[str] = []
+    balance_kopeks: int = 0
+    subscription: AdminAccountMergePreviewSubscription | None = None
+    subscriptions_count: int = 0
+    created_at: datetime | None = None
+
+
+class AdminAccountMergePreviewRequest(BaseModel):
+    """Request to preview merging another account into the selected primary user."""
+
+    secondary_user_id: int = Field(..., gt=0, description='User ID to merge into the primary user')
+
+
+class AdminAccountMergePreviewResponse(BaseModel):
+    """Preview of an admin-initiated account merge."""
+
+    primary: AdminAccountMergePreviewUser
+    secondary: AdminAccountMergePreviewUser
+
+
+class AdminAccountMergeRequest(AdminAccountMergePreviewRequest):
+    """Request to merge another account into the selected primary user."""
+
+    keep_subscription_from: Literal['primary', 'secondary'] = Field(
+        default='primary',
+        description='Which account subscription to keep in legacy single-subscription mode',
+    )
+
+
+class AdminAccountMergeResponse(BaseModel):
+    """Response after admin account merge."""
+
+    success: bool
+    primary_user_id: int
+    secondary_user_id: int
     message: str
 
 

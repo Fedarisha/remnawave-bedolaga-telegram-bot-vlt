@@ -18,6 +18,7 @@ from app.database.crud.subscription import (
 )
 from app.database.crud.tariff import get_tariff_by_id
 from app.database.crud.user import (
+    OAUTH_PROVIDER_COLUMNS,
     add_user_balance,
     delete_user as soft_delete_user,
     get_referrals,
@@ -27,6 +28,7 @@ from app.database.crud.user import (
     get_users_list,
     get_users_spending_stats,
     get_users_statistics,
+    is_email_taken,
     subtract_user_balance,
 )
 from app.database.crud.user_device_alias import (
@@ -51,11 +53,17 @@ from app.database.models import (
     UserPromoGroup,
     UserStatus,
 )
+from app.services.account_merge_service import execute_merge, get_merge_preview
 from app.services.permission_service import PermissionService
 from app.utils.timezone import panel_datetime_to_utc
 
 from ..dependencies import get_cabinet_db, require_permission
 from ..schemas.users import (
+    AdminAccountMergePreviewRequest,
+    AdminAccountMergePreviewResponse,
+    AdminAccountMergePreviewUser,
+    AdminAccountMergeRequest,
+    AdminAccountMergeResponse,
     AdminUserGiftItem,
     AdminUserGiftsResponse,
     AssignReferrerRequest,
@@ -90,6 +98,8 @@ from ..schemas.users import (
     TrafficPurchaseItem,
     UpdateBalanceRequest,
     UpdateBalanceResponse,
+    UpdateUserEmailRequest,
+    UpdateUserEmailResponse,
     UpdatePromoGroupRequest,
     UpdatePromoGroupResponse,
     UpdateReferralCommissionRequest,
@@ -121,6 +131,17 @@ from ..schemas.users import (
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/admin/users', tags=['Cabinet Admin Users'])
+
+
+def _build_admin_merge_preview_response(preview: dict) -> AdminAccountMergePreviewResponse:
+    return AdminAccountMergePreviewResponse(
+        primary=AdminAccountMergePreviewUser(**preview['primary']),
+        secondary=AdminAccountMergePreviewUser(**preview['secondary']),
+    )
+
+
+def _user_has_non_email_auth(user: User) -> bool:
+    return bool(user.telegram_id) or any(bool(getattr(user, field, None)) for field in OAUTH_PROVIDER_COLUMNS.values())
 
 
 def _build_user_list_item(user: User, spending_stats: dict = None) -> UserListItem:
@@ -1775,6 +1796,215 @@ async def get_user_available_tariffs(
         total=len(tariff_items),
         current_tariff_id=current_tariff_id,
         current_tariff_name=current_tariff_name,
+    )
+
+
+# === Account Merge ===
+
+
+@router.post('/{user_id}/merge/preview', response_model=AdminAccountMergePreviewResponse)
+async def preview_admin_account_merge(
+    user_id: int,
+    request: AdminAccountMergePreviewRequest,
+    admin: User = Depends(require_permission('users:edit')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Preview an admin-initiated account merge.
+
+    The selected user_id is the primary account that remains. The requested
+    secondary user is absorbed using the same merge service as the user-facing
+    account-linking flow.
+    """
+    if user_id == request.secondary_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Primary and secondary users must be different',
+        )
+
+    try:
+        preview = await get_merge_preview(db, user_id, request.secondary_user_id)
+    except ValueError as exc:
+        logger.warning(
+            'Admin account merge preview failed',
+            admin_id=admin.id,
+            primary_user_id=user_id,
+            secondary_user_id=request.secondary_user_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    return _build_admin_merge_preview_response(preview)
+
+
+@router.post('/{user_id}/merge', response_model=AdminAccountMergeResponse)
+async def execute_admin_account_merge(
+    user_id: int,
+    request: AdminAccountMergeRequest,
+    admin: User = Depends(require_permission('users:edit')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Merge another account into the selected user on behalf of an admin."""
+    if user_id == request.secondary_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Primary and secondary users must be different',
+        )
+
+    try:
+        await execute_merge(
+            db=db,
+            primary_user_id=user_id,
+            secondary_user_id=request.secondary_user_id,
+            keep_subscription_from=request.keep_subscription_from,
+            provider='admin',
+            provider_id=str(admin.id),
+        )
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        logger.warning(
+            'Admin account merge rejected',
+            admin_id=admin.id,
+            primary_user_id=user_id,
+            secondary_user_id=request.secondary_user_id,
+            keep_subscription_from=request.keep_subscription_from,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(
+            'Admin account merge failed',
+            admin_id=admin.id,
+            primary_user_id=user_id,
+            secondary_user_id=request.secondary_user_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Account merge failed due to an internal error',
+        ) from exc
+
+    merged_user = await get_user_by_id(db, user_id)
+    if merged_user:
+        try:
+            from app.services.remnawave_resync_service import resync_user_subscriptions_with_panel
+
+            resync_result = await resync_user_subscriptions_with_panel(db, merged_user)
+            logger.info(
+                'Admin post-merge resync completed',
+                admin_id=admin.id,
+                primary_user_id=user_id,
+                secondary_user_id=request.secondary_user_id,
+                synced=resync_result['synced'],
+                failed=resync_result['failed'],
+            )
+        except Exception as resync_error:
+            logger.error(
+                'Admin post-merge resync failed (non-fatal)',
+                admin_id=admin.id,
+                primary_user_id=user_id,
+                secondary_user_id=request.secondary_user_id,
+                error=resync_error,
+            )
+
+    logger.info(
+        'Admin account merge completed',
+        admin_id=admin.id,
+        primary_user_id=user_id,
+        secondary_user_id=request.secondary_user_id,
+        keep_subscription_from=request.keep_subscription_from,
+    )
+
+    return AdminAccountMergeResponse(
+        success=True,
+        primary_user_id=user_id,
+        secondary_user_id=request.secondary_user_id,
+        message='Accounts merged successfully',
+    )
+
+
+# === Email Management ===
+
+
+@router.post('/{user_id}/email', response_model=UpdateUserEmailResponse)
+async def update_user_email(
+    user_id: int,
+    request: UpdateUserEmailRequest,
+    admin: User = Depends(require_permission('users:edit')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Set, change, or clear a user's email from admin panel."""
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+
+    new_email = str(request.email).strip().lower() if request.email else None
+    if new_email and await is_email_taken(db, new_email, exclude_user_id=user_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Email is already used by another user')
+
+    if new_email is None and not _user_has_non_email_auth(user):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Cannot clear the only login method for this user',
+        )
+
+    old_email = user.email
+    email_changed = (old_email or '').lower() != (new_email or '')
+    now = datetime.now(UTC)
+
+    user.email = new_email
+    user.email_verified = bool(new_email and request.email_verified)
+    user.email_verified_at = now if user.email_verified else None
+    user.email_verification_source = 'admin_override' if user.email_verified else None
+    user.email_verification_token = None
+    user.email_verification_expires = None
+    user.email_change_new = None
+    user.email_change_code = None
+    user.email_change_expires = None
+    if new_email is None:
+        user.password_hash = None
+        user.password_reset_token = None
+        user.password_reset_expires = None
+    user.updated_at = now
+
+    await db.commit()
+    await db.refresh(user)
+
+    try:
+        from app.services.remnawave_resync_service import resync_user_subscriptions_with_panel
+
+        resync_result = await resync_user_subscriptions_with_panel(db, user)
+        logger.info(
+            'Admin post-email-update resync completed',
+            admin_id=admin.id,
+            user_id=user_id,
+            synced=resync_result['synced'],
+            failed=resync_result['failed'],
+        )
+    except Exception as resync_error:
+        logger.error(
+            'Admin post-email-update resync failed (non-fatal)',
+            admin_id=admin.id,
+            user_id=user_id,
+            error=resync_error,
+        )
+
+    logger.info(
+        'Admin updated user email',
+        admin_id=admin.id,
+        user_id=user_id,
+        old_email=old_email,
+        new_email=new_email,
+        email_changed=email_changed,
+        email_verified=user.email_verified,
+    )
+
+    return UpdateUserEmailResponse(
+        success=True,
+        old_email=old_email,
+        new_email=user.email,
+        email_verified=user.email_verified,
+        message='User email updated',
     )
 
 
