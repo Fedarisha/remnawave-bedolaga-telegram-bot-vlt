@@ -412,7 +412,7 @@ def test_calculate_renewal_price():
 ### Сообщения о уязвимостях
 
 Для сообщений о критических уязвимостях безопасности:
-- Свяжитесь с [@fringg](https://t.me/fringg) напрямую
+- Свяжитесь с [@fringg](https://telegram.me/fringg) напрямую
 - Не создавайте публичные issues для уязвимостей
 - Дайте время на исправление перед публичным раскрытием
 
@@ -427,9 +427,9 @@ def test_calculate_renewal_price():
 
 ### Каналы связи
 
-- **💬 Telegram Group:** [Bedolaga Chat](https://t.me/+wTdMtSWq8YdmZmVi) - общие вопросы
+- **💬 Telegram Group:** [Bedolaga Chat](https://telegram.me/+wTdMtSWq8YdmZmVi) - общие вопросы
 - **🐛 GitHub Issues:** Технические вопросы и баги
-- **📧 Прямой контакт:** [@fringg](https://t.me/fringg) - только критические вопросы
+- **📧 Прямой контакт:** [@fringg](https://telegram.me/fringg) - только критические вопросы
 
 ### Часто задаваемые вопросы
 

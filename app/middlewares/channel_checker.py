@@ -526,12 +526,12 @@ class ChannelCheckerMiddleware(BaseMiddleware):
 
 
 def _normalize_channel_link(link: str) -> str:
-    """Normalize channel link: convert @username to https://t.me/username."""
+    """Normalize channel link: convert @username to https://telegram.me/username."""
     if not link:
         return link
     link = link.strip()
     if link.startswith('@'):
-        return f'https://t.me/{link[1:]}'
+        return f'https://telegram.me/{link[1:]}'
     return link
 
 

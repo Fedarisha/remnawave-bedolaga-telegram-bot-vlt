@@ -45,7 +45,7 @@ def test_init_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, 'YOOKASSA_SECRET_KEY', '', raising=False)
     service = YooKassaService()
     assert service.configured is False
-    assert service.return_url == 'https://t.me/'
+    assert service.return_url == 'https://telegram.me/'
 
 
 @pytest.mark.anyio('asyncio')

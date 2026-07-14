@@ -197,7 +197,7 @@ async def process_channel_id(message: Message, state: FSMContext, **kwargs) -> N
     await state.set_state(AddChannelStates.waiting_channel_link)
     await message.answer(
         f'Канал: <code>{channel_id}</code>\n\n'
-        'Теперь отправьте ссылку на канал (например <code>https://t.me/mychannel</code>)\n'
+        'Теперь отправьте ссылку на канал (например <code>https://telegram.me/mychannel</code>)\n'
         'Или отправьте <code>-</code> чтобы пропустить:'
     )
 
@@ -214,11 +214,11 @@ async def process_channel_link(message: Message, state: FSMContext, **kwargs) ->
 
     if link is not None:
         # Validate and normalize channel link
-        if not link.startswith(('https://t.me/', 'http://t.me/', '@')):
-            await message.answer('Ссылка должна быть URL вида t.me или @username. Попробуйте ещё раз:')
+        if not link.startswith(('https://telegram.me/', 'http://telegram.me/', '@')):
+            await message.answer('Ссылка должна быть URL вида telegram.me или @username. Попробуйте ещё раз:')
             return
         if link.startswith('@'):
-            link = f'https://t.me/{link[1:]}'
+            link = f'https://telegram.me/{link[1:]}'
         if link.startswith('http://'):
             link = link.replace('http://', 'https://', 1)
 

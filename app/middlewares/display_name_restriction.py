@@ -168,7 +168,7 @@ class DisplayNameRestrictionMiddleware(BaseMiddleware):
         normalized = self._normalize_text(lower_value)
         collapsed = COLLAPSE_PATTERN.sub('', normalized)
 
-        # Проверяем "tme" с контекстом (ловим t.me ссылки, но не случайные совпадения в именах)
+        # Проверяем "tme" с контекстом (ловим telegram.me ссылки, но не случайные совпадения в именах)
         # Ищем tme в начале, конце, или с пробелами/спецсимволами вокруг
         if re.search(r'(?:^|[^a-zа-яё])tme(?:[^a-zа-яё]|$)', collapsed, re.IGNORECASE):
             return True

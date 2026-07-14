@@ -246,7 +246,7 @@ def _build_purchase_status_response(purchase: GuestPurchase) -> PurchaseStatusRe
         if not recipient_in_bot:
             bot_username = settings.get_bot_username()
             if bot_username:
-                bot_link = f'https://t.me/{bot_username}'
+                bot_link = f'https://telegram.me/{bot_username}'
 
     return PurchaseStatusResponse(
         status=purchase.status,

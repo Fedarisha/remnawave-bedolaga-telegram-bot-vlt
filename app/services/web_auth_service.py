@@ -5,7 +5,7 @@ when oauth.telegram.org is blocked/unreachable.
 
 Flow:
 1. Frontend requests token: POST /cabinet/auth/deeplink/request
-2. User clicks t.me/bot?start=webauth_TOKEN
+2. User clicks telegram.me/bot?start=webauth_TOKEN
 3. Bot receives /start, links token to Telegram user
 4. Frontend polls: POST /cabinet/auth/deeplink/poll -> gets JWT tokens
 """

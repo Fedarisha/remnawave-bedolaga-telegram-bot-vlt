@@ -42,8 +42,8 @@ CRASH_ERROR_PREVIEW_LENGTH: Final[int] = 200
 # URL-ы
 GITHUB_BOT_URL: Final[str] = 'https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot'
 GITHUB_CABINET_URL: Final[str] = 'https://github.com/BEDOLAGA-DEV/bedolaga-cabinet'
-COMMUNITY_URL: Final[str] = 'https://t.me/+wTdMtSWq8YdmZmVi'
-DEVELOPER_CONTACT_URL: Final[str] = 'https://t.me/fringg'
+COMMUNITY_URL: Final[str] = 'https://telegram.me/+wTdMtSWq8YdmZmVi'
+DEVELOPER_CONTACT_URL: Final[str] = 'https://telegram.me/fringg'
 
 # Ключевые слова для определения типа ошибки
 WEBHOOK_ERROR_KEYWORDS: Final[tuple[str, ...]] = ('webhook', 'failed to resolve host')

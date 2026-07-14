@@ -225,7 +225,7 @@ async def test_submit_subscription_renewal_returns_cryptobot_invoice(monkeypatch
             return {
                 'local_payment_id': 321,
                 'invoice_id': 'inv_123',
-                'bot_invoice_url': 'https://t.me/invoice',
+                'bot_invoice_url': 'https://telegram.me/invoice',
                 'mini_app_invoice_url': 'https://mini.app/pay',
                 'web_app_invoice_url': None,
             }
@@ -402,7 +402,7 @@ async def test_submit_subscription_renewal_rounds_up_cryptobot_amount(monkeypatc
             return {
                 'local_payment_id': 654,
                 'invoice_id': 'inv_round',
-                'bot_invoice_url': 'https://t.me/pay',
+                'bot_invoice_url': 'https://telegram.me/pay',
                 'mini_app_invoice_url': 'https://mini.app/pay-round',
                 'web_app_invoice_url': None,
             }

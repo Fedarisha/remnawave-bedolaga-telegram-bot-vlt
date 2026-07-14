@@ -3788,7 +3788,7 @@ class PaymentMethodConfig(Base):
     # window.location.href вместо показа панели "Нажмите чтобы открыть ссылку
     # оплаты". Внутри Telegram MiniApp это даёт seamless flow — провайдер
     # открывается в том же WebView, после оплаты return_url возвращает на
-    # /balance/top-up/result. Для t.me/ URL (Telegram Stars, CryptoBot) флаг
+    # /balance/top-up/result. Для telegram.me/ URL (Telegram Stars, CryptoBot) флаг
     # игнорируется — такие ссылки всегда идут через нативный handler.
     # По умолчанию False (классическое поведение со ссылкой) — backwards-compat.
     open_url_direct = Column(Boolean, nullable=False, default=False)
@@ -3807,7 +3807,7 @@ class RequiredChannel(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     channel_id = Column(String(100), unique=True, nullable=False)  # -100xxx numeric format (always string)
-    channel_link = Column(String(500), nullable=True)  # https://t.me/xxx
+    channel_link = Column(String(500), nullable=True)  # https://telegram.me/xxx
     title = Column(String(255), nullable=True)  # Display name
     is_active = Column(Boolean, nullable=False, server_default='true')
     sort_order = Column(Integer, nullable=False, server_default='0')

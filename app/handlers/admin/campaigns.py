@@ -77,12 +77,12 @@ def _format_campaign_summary(campaign, texts) -> str:
 
 async def _get_bot_deep_link(callback: types.CallbackQuery, start_parameter: str) -> str:
     bot = await callback.bot.get_me()
-    return f'https://t.me/{bot.username}?start={start_parameter}'
+    return f'https://telegram.me/{bot.username}?start={start_parameter}'
 
 
 async def _get_bot_deep_link_from_message(message: types.Message, start_parameter: str) -> str:
     bot = await message.bot.get_me()
-    return f'https://t.me/{bot.username}?start={start_parameter}'
+    return f'https://telegram.me/{bot.username}?start={start_parameter}'
 
 
 def _build_campaign_servers_keyboard(

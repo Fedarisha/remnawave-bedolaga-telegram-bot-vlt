@@ -43,15 +43,15 @@ class YooKassaService:
                 self.configured = False
 
         if not self.configured:
-            self.return_url = 'https://t.me/'
+            self.return_url = 'https://telegram.me/'
             logger.warning('YooKassa не активна, используем заглушку return_url', return_url=self.return_url)
         elif configured_return_url:
             self.return_url = configured_return_url
         elif bot_username_for_default_return:
-            self.return_url = f'https://t.me/{bot_username_for_default_return}'
+            self.return_url = f'https://telegram.me/{bot_username_for_default_return}'
             logger.info('YOOKASSA_RETURN_URL не установлен, используем бота', return_url=self.return_url)
         else:
-            self.return_url = 'https://t.me/'
+            self.return_url = 'https://telegram.me/'
             logger.warning(
                 'КРИТИЧНО: YOOKASSA_RETURN_URL не установлен И username бота не предоставлен. Используем заглушку: . Платежи могут работать некорректно.',
                 return_url=self.return_url,

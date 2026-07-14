@@ -2,7 +2,7 @@
 
 Background — the bug this helper fixes
 --------------------------------------
-A new user clicks ``t.me/bot?start=ref_XYZ``, then immediately taps the
+A new user clicks ``telegram.me/bot?start=ref_XYZ``, then immediately taps the
 Telegram menu's "Open Cabinet" WebApp button. The cabinet's auth route
 fires before the bot's /start handler finishes, so:
 

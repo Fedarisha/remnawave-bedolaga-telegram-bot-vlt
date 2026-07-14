@@ -6,17 +6,17 @@ from app.database.crud.required_channel import validate_channel_id as _validate_
 
 
 def _validate_channel_link_value(v: str | None) -> str | None:
-    """Shared channel_link validation: t.me URL, @username auto-convert, http->https upgrade."""
+    """Shared channel_link validation: telegram.me URL, @username auto-convert, http->https upgrade."""
     if v is None:
         return v
     v = v.strip()
-    if v.startswith('http://t.me/'):
+    if v.startswith('http://telegram.me/'):
         v = v.replace('http://', 'https://', 1)
-    if v.startswith('https://t.me/'):
+    if v.startswith('https://telegram.me/'):
         return v
     if v.startswith('@'):
-        return f'https://t.me/{v[1:]}'
-    raise ValueError('channel_link must be a t.me URL or @username')
+        return f'https://telegram.me/{v[1:]}'
+    raise ValueError('channel_link must be a telegram.me URL or @username')
 
 
 class ChannelResponse(BaseModel):

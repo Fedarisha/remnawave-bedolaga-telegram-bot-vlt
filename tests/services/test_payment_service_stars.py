@@ -33,7 +33,7 @@ class DummyBot:
     async def create_invoice_link(self, **kwargs: Any) -> str:
         """Эмулируем создание платежной ссылки и сохраняем параметры вызова."""
         self.calls.append(kwargs)
-        return 'https://t.me/invoice/stars'
+        return 'https://telegram.me/invoice/stars'
 
     async def send_message(self, **kwargs: Any) -> None:
         """Фиксируем отправленные сообщения пользователю."""
@@ -149,7 +149,7 @@ async def test_create_stars_invoice_calculates_stars(monkeypatch: pytest.MonkeyP
         payload='custom_payload',
     )
 
-    assert result == 'https://t.me/invoice/stars'
+    assert result == 'https://telegram.me/invoice/stars'
     assert len(bot.calls) == 1
     call = bot.calls[0]
     assert call['title'] == 'Пополнение баланса VPN'

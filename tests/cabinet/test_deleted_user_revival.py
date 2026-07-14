@@ -147,7 +147,7 @@ async def test_dependencies_rejects_deleted_user_without_init_data(
     assert isinstance(detail, dict)
     assert detail['code'] == 'account_deleted'
     assert detail['bot_username'] == 'mybot'
-    assert detail['telegram_deep_link'] == 'https://t.me/mybot?start=revive'
+    assert detail['telegram_deep_link'] == 'https://telegram.me/mybot?start=revive'
     assert user.status == UserStatus.DELETED.value, 'must not auto-revive without proof'
 
 
@@ -412,5 +412,5 @@ async def test_dependencies_deleted_email_only_user_without_telegram_id(
     # The deep-link is still emitted — it points to the bot itself, not
     # to any specific user. An email-only user CAN go open the bot via
     # /start with their referral chain to bootstrap.
-    assert detail['telegram_deep_link'] == 'https://t.me/mybot?start=revive'
+    assert detail['telegram_deep_link'] == 'https://telegram.me/mybot?start=revive'
     assert user.status == UserStatus.DELETED.value

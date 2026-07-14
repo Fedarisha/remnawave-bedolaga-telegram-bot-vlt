@@ -175,7 +175,7 @@ async def get_current_cabinet_user(
             }
             if bot_username:
                 detail['bot_username'] = bot_username
-                detail['telegram_deep_link'] = f'https://t.me/{bot_username}?start=revive'
+                detail['telegram_deep_link'] = f'https://telegram.me/{bot_username}?start=revive'
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=detail,

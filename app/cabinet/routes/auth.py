@@ -2087,7 +2087,7 @@ async def request_deep_link_token(
 ):
     """Generate a one-time deep link auth token.
 
-    Frontend shows t.me/{bot}?start=webauth_{token} to the user.
+    Frontend shows telegram.me/{bot}?start=webauth_{token} to the user.
     No auth required (user is not logged in yet).
     """
     client_ip = get_client_ip(raw_request)

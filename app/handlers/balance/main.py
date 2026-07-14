@@ -499,7 +499,7 @@ async def request_support_topup(callback: types.CallbackQuery, db_user: User):
         inline_keyboard=[
             [
                 types.InlineKeyboardButton(
-                    text='💬 Написать в поддержку', url=settings.get_support_contact_url() or 'https://t.me/'
+                    text='💬 Написать в поддержку', url=settings.get_support_contact_url() or 'https://telegram.me/'
                 )
             ],
             [types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')],

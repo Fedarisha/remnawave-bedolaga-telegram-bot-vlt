@@ -7,7 +7,7 @@ def get_campaign_deep_link(start_parameter: str) -> str:
     """Generate a Telegram deep link for a campaign."""
     bot_username = settings.get_bot_username()
     if bot_username:
-        return f'https://t.me/{bot_username}?start={start_parameter}'
+        return f'https://telegram.me/{bot_username}?start={start_parameter}'
     return f'?start={start_parameter}'
 
 

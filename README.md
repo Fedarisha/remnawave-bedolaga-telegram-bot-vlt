@@ -13,7 +13,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docs.bedolagam.ru/getting-started/docker-deployment)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-[📖 Документация](https://docs.bedolagam.ru) · [🤖 Тестировать бота](https://t.me/zero_ping_vpn_bot?start=Git) · [💬 Чат сообщества](https://t.me/+wTdMtSWq8YdmZmVi)
+[📖 Документация](https://docs.bedolagam.ru) · [🤖 Тестировать бота](https://telegram.me/zero_ping_vpn_bot?start=Git) · [💬 Чат сообщества](https://telegram.me/+wTdMtSWq8YdmZmVi)
 
 </div>
 
@@ -118,19 +118,19 @@ Bedolaga — полнофункциональная платформа для п
 | 💳 | **Freekassa** | NSPK СБП, карты | RUB |
 | 💳 | **Kassa AI** | СБП, карты, SberPay | RUB |
 | 💳 | **PayPalych (Pal24)** | Карты, СБП | RUB |
-| 🤝 | **[Platega](https://t.me/ArstanPlatega)** 🔸 | Карты, СБП, крипто | RUB |
-| 🤝 | **[WATA](https://t.me/wyrz_wata)** 🔸 | СБП, Карты | RUB |
+| 🤝 | **[Platega](https://telegram.me/ArstanPlatega)** 🔸 | Карты, СБП, крипто | RUB |
+| 🤝 | **[WATA](https://telegram.me/wyrz_wata)** 🔸 | СБП, Карты | RUB |
 | 💳 | **MulenPay** | Карты | RUB |
 | 💳 | **RioPay** | Карты | RUB |
 | 💳 | **SeverPay** | СБП, карты | RUB |
-| 🤝 | **[PayPear](https://t.me/Paymen1_Manager)** 🔸 | Карты, СБП, SberPay, T-Pay | RUB |
+| 🤝 | **[PayPear](https://telegram.me/Paymen1_Manager)** 🔸 | Карты, СБП, SberPay, T-Pay | RUB |
 | 🤝 | **[RollyPay](https://rollypay.io/?utm_source=bedolaga&utm_medium=community&utm_campaign=integration)** 🔸 | СБП, карты, крипто | RUB → USDT |
 | 🤝 | **[AuraPay](https://aurapay.tech/)** 🔸 | Карты, СБП | RUB |
 | 🤝 | **[Overpay](https://overpay.pro/)** 🔸 | Карты, СБП | RUB |
 | 🦌 | **Antilopay** | Карты, СБП, SberPay (RSA подпись) | RUB |
 | 💳 | **Etoplatezhi** | Карты, СБП | RUB |
-| 🪐 | **[Jupiter](https://t.me/k_juppiter)** 🔸 | СБП через QR (FPGate P2P v2.1) | RUB |
-| 🍩 | **[Donut](https://t.me/donut_payment)** 🔸 | Карты, СБП по телефону, СБП QR (P2P) | RUB |
+| 🪐 | **[Jupiter](https://telegram.me/k_juppiter)** 🔸 | СБП через QR (FPGate P2P v2.1) | RUB |
+| 🍩 | **[Donut](https://telegram.me/donut_payment)** 🔸 | Карты, СБП по телефону, СБП QR (P2P) | RUB |
 | 🌋 | **Lava Business** | Карты, СБП (gate.lava.ru) | RUB |
 | 🍎 | **Apple In-App Purchase** | Покупки через iOS App Store | USD |
 | 📲 | **Tribute** | Telegram-платежи | RUB |
@@ -153,7 +153,7 @@ Bedolaga — полнофункциональная платформа для п
 Bedolaga — официальный партнёр платёжной системы **Platega**.<br>
 Пользователи бота получают **особые условия** при подключении по кодовому слову **`bedolaga`**
 
-📩 По вопросам: [@ArstanPlatega](https://t.me/ArstanPlatega)
+📩 По вопросам: [@ArstanPlatega](https://telegram.me/ArstanPlatega)
 
 </td>
 <td align="center">
@@ -165,7 +165,7 @@ Bedolaga — официальный партнёр платёжной систе
 Bedolaga — официальный партнёр платёжной системы **WATA**.<br>
 Пользователи бота получают **бесплатное подключение** по кодовому слову **`bedolaga`**
 
-📩 По вопросам: [@wyrz_wata](https://t.me/wyrz_wata)
+📩 По вопросам: [@wyrz_wata](https://telegram.me/wyrz_wata)
 
 </td>
 </tr>
@@ -178,7 +178,7 @@ Bedolaga — официальный партнёр платёжной систе
 Банковские карты, СБП, SberPay и T-Pay — всё через единый API.<br>
 Подключение по **спец. условиям** через кодовое слово **`БЕДОЛАГА`**
 
-📩 Менеджер: [@Paymen1_Manager](https://t.me/Paymen1_Manager)
+📩 Менеджер: [@Paymen1_Manager](https://telegram.me/Paymen1_Manager)
 
 </td>
 <td align="center">
@@ -190,7 +190,7 @@ Bedolaga — официальный партнёр платёжного шлюз
 Универсальная форма оплаты, высокая проходимость, стабильная работа в каскаде.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
 
-📩 Менеджер: [@rollypay_manager](https://t.me/rollypay_manager) | 🌐 [rollypay.io](https://rollypay.io/?utm_source=bedolaga&utm_medium=community&utm_campaign=integration)
+📩 Менеджер: [@rollypay_manager](https://telegram.me/rollypay_manager) | 🌐 [rollypay.io](https://rollypay.io/?utm_source=bedolaga&utm_medium=community&utm_campaign=integration)
 
 </td>
 </tr>
@@ -203,7 +203,7 @@ Bedolaga — официальный партнёр платёжной систе
 Банковские карты и СБП через единый API с быстрой интеграцией.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
 
-📩 Менеджер: [@kickdownm](https://t.me/kickdownm) | 🌐 [aurapay.tech](https://aurapay.tech/)
+📩 Менеджер: [@kickdownm](https://telegram.me/kickdownm) | 🌐 [aurapay.tech](https://aurapay.tech/)
 
 </td>
 <td align="center">
@@ -214,7 +214,7 @@ Bedolaga — официальный партнёр платёжного шлюз
 Банковские карты и СБП, mTLS-авторизация, HPP-интеграция.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
 
-📩 Менеджер: [@A_OverPay](https://t.me/A_OverPay) | 🌐 [overpay.pro](https://overpay.pro/)
+📩 Менеджер: [@A_OverPay](https://telegram.me/A_OverPay) | 🌐 [overpay.pro](https://overpay.pro/)
 
 </td>
 </tr>
@@ -228,7 +228,7 @@ Bedolaga — официальный партнёр платёжного шлюз
 Высокая проходимость, callback-driven архитектура, защита от replay-атак.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
 
-📩 Менеджер: [@k_juppiter](https://t.me/k_juppiter)
+📩 Менеджер: [@k_juppiter](https://telegram.me/k_juppiter)
 
 </td>
 <td align="center">
@@ -240,7 +240,7 @@ P2P-оплата картой, СБП по номеру телефона и СБ
 HMAC-SHA256 подпись, sticky terminal-status guard, защита от amount tampering.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
 
-📩 Менеджер: [@donut_payment](https://t.me/donut_payment)
+📩 Менеджер: [@donut_payment](https://telegram.me/donut_payment)
 
 </td>
 </tr>
@@ -326,14 +326,14 @@ docker compose up -d
 
 <div align="center">
 
-[![Telegram Chat](https://img.shields.io/badge/Telegram-Чат_сообщества-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/+wTdMtSWq8YdmZmVi)
+[![Telegram Chat](https://img.shields.io/badge/Telegram-Чат_сообщества-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://telegram.me/+wTdMtSWq8YdmZmVi)
 [![GitHub Issues](https://img.shields.io/badge/GitHub-Issues-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/issues)
 
 </div>
 
 - 🐛 **Баги и предложения** — [GitHub Issues](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/issues)
-- 💬 **Вопросы и обсуждения** — [Telegram-чат](https://t.me/+wTdMtSWq8YdmZmVi)
-- 🤖 **Тестирование** — [@zero_ping_vpn_bot](https://t.me/zero_ping_vpn_bot?start=Git)
+- 💬 **Вопросы и обсуждения** — [Telegram-чат](https://telegram.me/+wTdMtSWq8YdmZmVi)
+- 🤖 **Тестирование** — [@zero_ping_vpn_bot](https://telegram.me/zero_ping_vpn_bot?start=Git)
 
 ---
 

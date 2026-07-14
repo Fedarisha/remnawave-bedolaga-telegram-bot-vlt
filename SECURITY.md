@@ -19,14 +19,14 @@
 **НЕ создавайте публичные Issues или Pull Requests**
 
 Вместо этого:
-1. Свяжитесь с [@fringg](https://t.me/fringg) напрямую в Telegram
+1. Свяжитесь с [@fringg](https://telegram.me/fringg) напрямую в Telegram
 2. Укажите в сообщении "SECURITY VULNERABILITY" в начале
 3. Опишите уязвимость детально
 4. Дайте время на исправление (обычно 90 дней)
 
 ### 📧 Контактная информация
 
-- **Telegram**: [@fringg](https://t.me/fringg)
+- **Telegram**: [@fringg](https://telegram.me/fringg)
 - **Response Time**: 24-48 часов
 - **Fix Timeline**: 7-30 дней (в зависимости от критичности)
 
@@ -308,7 +308,7 @@ services:
 ### 📢 Уведомления о безопасности
 
 Подпишитесь на уведомления:
-- **Telegram**: [Bedolaga Chat](https://t.me/+wTdMtSWq8YdmZmVi)
+- **Telegram**: [Bedolaga Chat](https://telegram.me/+wTdMtSWq8YdmZmVi)
 - **GitHub**: Watch repository для получения уведомлений о релизах
 - **RSS**: Следите за GitHub Releases
 

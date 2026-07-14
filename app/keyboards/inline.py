@@ -2256,7 +2256,7 @@ def get_support_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMark
             [
                 InlineKeyboardButton(
                     text=texts.t('CONTACT_SUPPORT_BUTTON', '💬 Связаться с поддержкой'),
-                    url=settings.get_support_contact_url() or 'https://t.me/',
+                    url=settings.get_support_contact_url() or 'https://telegram.me/',
                 )
             ]
         )

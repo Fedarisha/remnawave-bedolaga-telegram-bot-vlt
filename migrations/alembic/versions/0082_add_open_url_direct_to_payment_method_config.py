@@ -9,7 +9,7 @@
 После оплаты return_url возвращает юзера на /balance/top-up/result.
 
 По умолчанию False — backwards-compat. Админ включает per-провайдер в UI
-платёжных методов. Для t.me/ URL (Stars, CryptoBot) флаг игнорируется — такие
+платёжных методов. Для telegram.me/ URL (Stars, CryptoBot) флаг игнорируется — такие
 ссылки всегда идут через openTelegramLink / openInvoice native handler.
 
 Revision ID: 0082

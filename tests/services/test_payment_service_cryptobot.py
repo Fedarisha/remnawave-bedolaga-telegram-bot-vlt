@@ -67,7 +67,7 @@ def _make_service(stub: StubCryptoBotService | None) -> PaymentService:
 async def test_create_cryptobot_payment_success(monkeypatch: pytest.MonkeyPatch) -> None:
     response = {
         'invoice_id': 12345,
-        'bot_invoice_url': 'https://t.me/invoice',
+        'bot_invoice_url': 'https://telegram.me/invoice',
         'mini_app_invoice_url': 'https://mini.app/invoice',
         'web_app_invoice_url': 'https://web.app/invoice',
     }
@@ -106,7 +106,7 @@ async def test_create_cryptobot_payment_success(monkeypatch: pytest.MonkeyPatch)
     assert result is not None
     assert result['local_payment_id'] == 555
     assert result['invoice_id'] == '12345'
-    assert result['bot_invoice_url'] == 'https://t.me/invoice'
+    assert result['bot_invoice_url'] == 'https://telegram.me/invoice'
     assert stub.calls and stub.calls[0]['expires_in'] == 600
     assert captured_args['invoice_id'] == '12345'
     assert captured_args['amount'] == '12.50'

@@ -1841,7 +1841,7 @@ class Settings(BaseSettings):
         """Always return the Telegram bot deep link for a referral code."""
         safe_code = self._encode_referral_code(referral_code)
         username = bot_username or self.get_bot_username() or 'bot'
-        return f'https://t.me/{username}?start={safe_code}'
+        return f'https://telegram.me/{username}?start={safe_code}'
 
     def get_cabinet_referral_link(self, referral_code: str) -> str | None:
         """Return the cabinet referral link, or None if cabinet is not configured."""
@@ -2042,7 +2042,7 @@ class Settings(BaseSettings):
             return self.YOOKASSA_RETURN_URL
         if self.WEBHOOK_URL:
             return f'{self.WEBHOOK_URL}/payment-success'
-        return 'https://t.me/'
+        return 'https://telegram.me/'
 
     def is_cryptobot_enabled(self) -> bool:
         return self.CRYPTOBOT_ENABLED and self.CRYPTOBOT_API_TOKEN is not None
@@ -3093,17 +3093,17 @@ class Settings(BaseSettings):
 
         contact_without_prefix = contact.lstrip('@')
 
-        if contact_without_prefix.startswith(('t.me/', 'telegram.me/', 'telegram.dog/')):
+        if contact_without_prefix.startswith(('telegram.me/', 'telegram.me/', 'telegram.dog/')):
             return f'https://{contact_without_prefix}'
 
-        if contact.startswith(('t.me/', 'telegram.me/', 'telegram.dog/')):
+        if contact.startswith(('telegram.me/', 'telegram.me/', 'telegram.dog/')):
             return f'https://{contact}'
 
         if '.' in contact_without_prefix:
             return f'https://{contact_without_prefix}'
 
         if contact_without_prefix:
-            return f'https://t.me/{contact_without_prefix}'
+            return f'https://telegram.me/{contact_without_prefix}'
 
         return None
 
@@ -3119,7 +3119,7 @@ class Settings(BaseSettings):
         if contact.startswith(('http://', 'https://', 'tg://')):
             return contact
 
-        if contact.startswith(('t.me/', 'telegram.me/', 'telegram.dog/')):
+        if contact.startswith(('telegram.me/', 'telegram.me/', 'telegram.dog/')):
             url = self.get_support_contact_url()
             return url or contact
 
