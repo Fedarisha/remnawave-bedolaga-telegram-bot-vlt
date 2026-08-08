@@ -70,7 +70,7 @@ from .tickets import router as tickets_router
 from .websocket import router as websocket_router
 from .wheel import router as wheel_router
 from .withdrawal import router as withdrawal_router
-from .x_ui_migration import router as x_ui_migration_router
+from .x_ui_migration import admin_router as admin_x_ui_migration_router, router as x_ui_migration_router
 
 
 # Main cabinet router
@@ -119,6 +119,7 @@ router.include_router(gift_router)
 
 # 3x-ui migration
 router.include_router(x_ui_migration_router)
+router.include_router(admin_x_ui_migration_router)
 
 # Admin routes (notifications router MUST be before tickets router to avoid route conflict)
 router.include_router(admin_ticket_notifications_router)
