@@ -433,34 +433,6 @@ def _resolve_button_url(
     return result
 
 
-def _filter_referenced_svg_library(
-    svg_library: dict[str, Any],
-    platforms: dict[str, Any],
-) -> dict[str, Any]:
-    """Keep only SVG entries referenced by the returned platform config.
-
-    Remnawave configs may contain the complete shared icon library even when a
-    subscription page uses only a fraction of it.  Returning the unused SVGs
-    makes this endpoint unnecessarily large and can also amplify proxy/network
-    issues.  The connection UI only looks up icons through ``svgIconKey``.
-    """
-    referenced_keys: set[str] = set()
-
-    def collect(value: Any) -> None:
-        if isinstance(value, dict):
-            svg_icon_key = value.get('svgIconKey')
-            if isinstance(svg_icon_key, str) and svg_icon_key:
-                referenced_keys.add(svg_icon_key)
-            for nested_value in value.values():
-                collect(nested_value)
-        elif isinstance(value, list):
-            for nested_value in value:
-                collect(nested_value)
-
-    collect(platforms)
-    return {key: value for key, value in svg_library.items() if key in referenced_keys}
-
-
 @router.get('/app-config')
 async def get_app_config(
     user: User = Depends(get_current_cabinet_user),
@@ -572,15 +544,10 @@ async def get_app_config(
             platform_output['apps'] = enriched_apps
             platforms[platform_key] = platform_output
 
-    svg_library = config.get('svgLibrary', {})
-    if not isinstance(svg_library, dict):
-        svg_library = {}
-    filtered_svg_library = _filter_referenced_svg_library(svg_library, platforms)
-
     return {
         'isRemnawave': True,
         'platforms': platforms,
-        'svgLibrary': filtered_svg_library,
+        'svgLibrary': config.get('svgLibrary', {}),
         'baseTranslations': config.get('baseTranslations'),
         'baseSettings': config.get('baseSettings'),
         'uiConfig': config.get('uiConfig', {}),
