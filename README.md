@@ -118,8 +118,8 @@ Bedolaga — полнофункциональная платформа для п
 | 💳 | **Freekassa** | NSPK СБП, карты | RUB |
 | 💳 | **Kassa AI** | СБП, карты, SberPay | RUB |
 | 💳 | **PayPalych (Pal24)** | Карты, СБП | RUB |
-| 🤝 | **[Platega](https://telegram.me/ArstanPlatega)** 🔸 | Карты, СБП, крипто | RUB |
-| 🤝 | **[WATA](https://telegram.me/wyrz_wata)** 🔸 | СБП, Карты | RUB |
+| 🤝 | **[Platega](https://t.me/ArstanPlatega)** 🔸 | Карты, СБП, крипто | RUB |
+| 💳 | **WATA** | СБП, Карты | RUB |
 | 💳 | **MulenPay** | Карты | RUB |
 | 💳 | **RioPay** | Карты | RUB |
 | 💳 | **SeverPay** | СБП, карты | RUB |
@@ -154,18 +154,6 @@ Bedolaga — официальный партнёр платёжной систе
 Пользователи бота получают **особые условия** при подключении по кодовому слову **`bedolaga`**
 
 📩 По вопросам: [@ArstanPlatega](https://telegram.me/ArstanPlatega)
-
-</td>
-<td align="center">
-
-<img src=".github/assets/wata-logo.jpg" alt="WATA" width="60" />
-
-**🤝 Официальный партнёр WATA**
-
-Bedolaga — официальный партнёр платёжной системы **WATA**.<br>
-Пользователи бота получают **бесплатное подключение** по кодовому слову **`bedolaga`**
-
-📩 По вопросам: [@wyrz_wata](https://telegram.me/wyrz_wata)
 
 </td>
 </tr>

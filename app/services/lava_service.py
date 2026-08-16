@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import json
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 import structlog
@@ -31,6 +32,20 @@ from app.config import settings
 
 
 logger = structlog.get_logger(__name__)
+
+
+def _strip_url_query(url: str) -> str:
+    """Return ``url`` without its query string or fragment.
+
+    Lava Business rejects successUrl/failUrl that carry a query string ("ошибочный формат
+    ссылки", HTTP 422). Callers should pass clean URLs, but strip defensively so a stray
+    ``?param=`` (e.g. a misconfigured LAVA_RETURN_URL) can't break invoice creation.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, '', ''))
 
 
 class LavaAPIError(Exception):
@@ -187,9 +202,9 @@ class LavaService:
         if hook_url:
             payload['hookUrl'] = hook_url[:500]
         if success_url:
-            payload['successUrl'] = success_url[:500]
+            payload['successUrl'] = _strip_url_query(success_url)[:500]
         if fail_url:
-            payload['failUrl'] = fail_url[:500]
+            payload['failUrl'] = _strip_url_query(fail_url)[:500]
         if expire_minutes is not None:
             # Lava лимит: 1..7200 минут (5 дней)
             payload['expire'] = max(1, min(7200, int(expire_minutes)))
@@ -234,6 +249,120 @@ class LavaService:
         """POST /business/invoice/get-available-tariffs — доступные методы оплаты для shopId."""
         payload: dict[str, Any] = {'shopId': self.shop_id}
         return await self._post('/business/invoice/get-available-tariffs', payload)
+
+    # ==================== Рекуррентные подписки ====================
+    #
+    # Подписка оформляется на ПРОДУКТ, созданный в кабинете Lava: цена и
+    # периодичность списаний заданы в продукте, а не передаются нами. Порядок
+    # вызовов: consumer/create -> subscription/subscribe -> оплата по
+    # ``data.url`` (первое списание = привязка) -> дальше Lava списывает сама.
+
+    async def list_recurrent_products(self) -> list[dict[str, Any]]:
+        """POST /business/recurrent/product/list — продукты, доступные для подписки."""
+        data = await self._post('/business/recurrent/product/list', {'shopId': self.shop_id})
+        items = (data or {}).get('data')
+        return list(items) if isinstance(items, list) else []
+
+    async def create_recurrent_consumer(
+        self,
+        *,
+        consumer_id: str,
+        email: str,
+        phone: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /business/recurrent/consumer/create — плательщик для подписок.
+
+        ``consumer_id`` генерируем мы: он же используется при оформлении подписки.
+        """
+        payload: dict[str, Any] = {
+            'consumerId': str(consumer_id),
+            'email': str(email),
+            'shopId': self.shop_id,
+        }
+        if phone:
+            payload['phone'] = str(phone)
+
+        logger.info('Lava API recurrent/consumer/create', consumer_id=consumer_id)
+        return await self._post('/business/recurrent/consumer/create', payload)
+
+    async def subscribe_recurrent(
+        self,
+        *,
+        product_id: str,
+        consumer_id: str,
+        order_id: str,
+    ) -> dict[str, Any]:
+        """POST /business/recurrent/subscription/subscribe — оформление подписки.
+
+        Возвращает ``data`` c ``subscriptionId``/``url``/``amount``/``expired``:
+        ``url`` — ссылка на первый платёж, до его оплаты подписка не активна.
+        """
+        payload: dict[str, Any] = {
+            'productId': str(product_id),
+            'consumerId': str(consumer_id),
+            'orderId': str(order_id),
+            'shopId': self.shop_id,
+        }
+        logger.info('Lava API recurrent/subscribe', product_id=product_id, order_id=order_id)
+        return await self._post('/business/recurrent/subscription/subscribe', payload)
+
+    async def unsubscribe_recurrent(
+        self,
+        *,
+        subscription_id: str | None = None,
+        order_id: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /business/recurrent/subscription/unsubscribe — отмена подписки."""
+        if not subscription_id and not order_id:
+            raise ValueError('Lava unsubscribe: subscription_id or order_id required')
+
+        payload: dict[str, Any] = {'shopId': self.shop_id}
+        if subscription_id:
+            payload['subscriptionId'] = str(subscription_id)
+        if order_id:
+            payload['orderId'] = str(order_id)
+
+        logger.info('Lava API recurrent/unsubscribe', subscription_id=subscription_id, order_id=order_id)
+        return await self._post('/business/recurrent/subscription/unsubscribe', payload)
+
+    async def get_recurrent_subscription_status(
+        self,
+        *,
+        subscription_id: str | None = None,
+        order_id: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /business/recurrent/subscription/status — статус подписки."""
+        if not subscription_id and not order_id:
+            raise ValueError('Lava subscription status: subscription_id or order_id required')
+
+        payload: dict[str, Any] = {'shopId': self.shop_id}
+        if subscription_id:
+            payload['subscriptionId'] = str(subscription_id)
+        if order_id:
+            payload['orderId'] = str(order_id)
+
+        return await self._post('/business/recurrent/subscription/status', payload)
+
+    async def offset_recurrent_next_pay_time(
+        self,
+        *,
+        days: int,
+        subscription_id: str | None = None,
+        order_id: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /business/recurrent/subscription/offset-next-pay-time — сдвиг даты списания."""
+        if not subscription_id and not order_id:
+            raise ValueError('Lava offset-next-pay-time: subscription_id or order_id required')
+
+        # Контракт: days строго 1..365, иначе 422 «Validation failed».
+        payload: dict[str, Any] = {'shopId': self.shop_id, 'days': max(1, min(int(days), 365))}
+        if subscription_id:
+            payload['subscriptionId'] = str(subscription_id)
+        if order_id:
+            payload['orderId'] = str(order_id)
+
+        logger.info('Lava API recurrent/offset-next-pay-time', subscription_id=subscription_id, days=days)
+        return await self._post('/business/recurrent/subscription/offset-next-pay-time', payload)
 
     def verify_webhook_signature(self, raw_body: bytes, received_signature: str) -> bool:
         """Верификация подписи webhook'а.

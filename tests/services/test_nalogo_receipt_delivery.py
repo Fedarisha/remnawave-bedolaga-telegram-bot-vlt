@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
@@ -34,7 +35,7 @@ async def test_deliver_nalogo_receipt_sends_email_and_telegram(monkeypatch: pyte
         )
         return True
 
-    import app.cabinet.services.email_service as email_service_module
+    email_service_module = import_module('app.cabinet.services.email_service')
 
     monkeypatch.setattr(
         email_service_module,
@@ -94,7 +95,7 @@ async def test_deliver_nalogo_receipt_is_deduplicated(monkeypatch: pytest.Monkey
         cache_state[key] = value
         return True
 
-    import app.cabinet.services.email_service as email_service_module
+    email_service_module = import_module('app.cabinet.services.email_service')
 
     monkeypatch.setattr(
         email_service_module,

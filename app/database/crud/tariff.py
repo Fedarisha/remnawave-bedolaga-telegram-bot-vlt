@@ -184,6 +184,8 @@ async def create_tariff(
     max_topup_traffic_gb: int = 0,
     is_daily: bool = False,
     daily_price_kopeks: int = 0,
+    # UUID продукта Lava для рекуррентных подписок
+    lava_product_id: str | None = None,
     # Произвольное количество дней
     custom_days_enabled: bool = False,
     price_per_day_kopeks: int = 0,
@@ -224,6 +226,7 @@ async def create_tariff(
         max_topup_traffic_gb=max(0, max_topup_traffic_gb),
         is_daily=is_daily,
         daily_price_kopeks=max(0, daily_price_kopeks),
+        lava_product_id=(lava_product_id or '').strip() or None,
         # Произвольное количество дней
         custom_days_enabled=custom_days_enabled,
         price_per_day_kopeks=max(0, price_per_day_kopeks),
@@ -257,7 +260,7 @@ async def create_tariff(
     await db.refresh(tariff)
 
     logger.info(
-        "Создан тариф '' (id tier traffic=GB, devices prices=)",
+        'Создан тариф',
         tariff_name=tariff.name,
         tariff_id=tariff.id,
         tier_level=tariff.tier_level,
@@ -286,6 +289,7 @@ async def update_tariff(
     period_prices: dict[int, int] | None = None,
     tier_level: int | None = None,
     is_trial_available: bool | None = None,
+    trial_duration_days: int | None = ...,  # ... = не передан, None = сбросить к дефолту (TRIAL_DURATION_DAYS)
     allow_traffic_topup: bool | None = None,
     promo_group_ids: list[int] | None = None,
     traffic_topup_enabled: bool | None = None,
@@ -293,6 +297,7 @@ async def update_tariff(
     max_topup_traffic_gb: int | None = None,
     is_daily: bool | None = None,
     daily_price_kopeks: int | None = None,
+    lava_product_id: str | None = None,
     # Произвольное количество дней
     custom_days_enabled: bool | None = None,
     price_per_day_kopeks: int | None = None,
@@ -341,6 +346,9 @@ async def update_tariff(
         tariff.tier_level = max(1, tier_level)
     if is_trial_available is not None:
         tariff.is_trial_available = is_trial_available
+    if trial_duration_days is not ...:
+        # Передан (включая None) — обновляем. None = использовать TRIAL_DURATION_DAYS.
+        tariff.trial_duration_days = trial_duration_days
     if traffic_topup_enabled is not None:
         tariff.traffic_topup_enabled = traffic_topup_enabled
     if traffic_topup_packages is not None:
@@ -351,6 +359,9 @@ async def update_tariff(
         tariff.is_daily = is_daily
     if daily_price_kopeks is not None:
         tariff.daily_price_kopeks = max(0, daily_price_kopeks)
+    if lava_product_id is not None:
+        # Пустая строка = отвязать тариф от продукта Lava
+        tariff.lava_product_id = lava_product_id.strip() or None
     # Произвольное количество дней
     if custom_days_enabled is not None:
         tariff.custom_days_enabled = custom_days_enabled
@@ -391,7 +402,7 @@ async def update_tariff(
     await db.commit()
     await db.refresh(tariff)
 
-    logger.info("Обновлен тариф '' (id=)", tariff_name=tariff.name, tariff_id=tariff.id)
+    logger.info('Обновлен тариф', tariff_name=tariff.name, tariff_id=tariff.id)
 
     return tariff
 
@@ -416,7 +427,7 @@ async def delete_tariff(db: AsyncSession, tariff: Tariff) -> bool:
     await db.commit()
 
     logger.info(
-        "Удален тариф '' (id=), затронуто подписок",
+        'Удален тариф',
         tariff_name=tariff_name,
         tariff_id=tariff_id,
         affected_subscriptions=affected_subscriptions,
@@ -557,7 +568,7 @@ async def sync_default_tariff_from_config(db: AsyncSession) -> Tariff | None:
         # Тариф уже существует — НЕ перезаписываем настройки из конфига.
         # Админ управляет тарифом через кабинет, синхронизация не нужна.
         logger.info(
-            "Дефолтный тариф 'Стандартный' (id=) уже существует, пропускаем sync из конфига",
+            "Дефолтный тариф 'Стандартный' уже существует, пропускаем sync из конфига",
             existing_tariff_id=existing_tariff.id,
         )
         return existing_tariff
@@ -610,7 +621,7 @@ async def load_period_prices_from_db(db: AsyncSession) -> None:
             return
 
         if not tariff.period_prices:
-            logger.warning("Тариф '' (id=) найден, но period_prices пуст", tariff_name=tariff.name, tariff_id=tariff.id)
+            logger.warning('Тариф найден, но period_prices пуст', tariff_name=tariff.name, tariff_id=tariff.id)
             return
 
         # Преобразуем строковые ключи в int
@@ -624,7 +635,7 @@ async def load_period_prices_from_db(db: AsyncSession) -> None:
                 {f'{d}д': f'{p // 100}₽' for d, p in period_prices.items()},
             )
         else:
-            logger.warning("Тариф '' не имеет активных периодов (все цены = 0)", tariff_name=tariff.name)
+            logger.warning('Тариф не имеет активных периодов (все цены = 0)', tariff_name=tariff.name)
 
     except Exception as e:
         logger.error('Ошибка загрузки периодов из БД', e=e)

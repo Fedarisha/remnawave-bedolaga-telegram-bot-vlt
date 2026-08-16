@@ -10,9 +10,9 @@ from app.external.remnawave_api import TrafficLimitStrategy, UserStatus
 from app.services.subscription_service import SubscriptionService
 
 
-def _panel_user(uuid: str = 'panel-uuid') -> SimpleNamespace:
+def _panel_user(panel_id: int = 123) -> SimpleNamespace:
     return SimpleNamespace(
-        uuid=uuid,
+        id=panel_id,
         short_uuid='short',
         subscription_url='https://sub.example/short',
         happ_crypto_link=None,
@@ -28,15 +28,18 @@ def _user() -> SimpleNamespace:
         username=None,
         telegram_id=837601435,
         email='Sas-01-72@yandex.ru',
-        remnawave_uuid='panel-uuid',
+        remnawave_id=123,
+        status='active',
     )
 
 
 def _subscription() -> SimpleNamespace:
     return SimpleNamespace(
         id=297,
-        remnawave_uuid='panel-uuid',
+        remnawave_id=123,
+        remnawave_short_uuid=None,
         end_date=datetime(2026, 7, 11, tzinfo=UTC),
+        actual_status='active',
         traffic_limit_gb=100,
         tariff=None,
         connected_squads=None,
@@ -48,7 +51,7 @@ async def test_multi_create_or_update_existing_user_preserves_hwid_devices() -> 
     service = SubscriptionService()
     existing = _panel_user()
     api = SimpleNamespace(
-        get_user_by_uuid=AsyncMock(return_value=existing),
+        get_user_by_id=AsyncMock(return_value=existing),
         update_user=AsyncMock(return_value=existing),
         reset_user_devices=AsyncMock(),
     )
@@ -74,9 +77,9 @@ async def test_single_create_or_update_existing_user_preserves_hwid_devices() ->
     service = SubscriptionService()
     existing = _panel_user()
     api = SimpleNamespace(
-        get_user_by_uuid=AsyncMock(return_value=existing),
-        get_user_by_telegram_id=AsyncMock(return_value=[]),
-        get_user_by_email=AsyncMock(return_value=[]),
+        get_user_by_id=AsyncMock(return_value=existing),
+        find_users_by_telegram_id=AsyncMock(return_value=[]),
+        find_users_by_email=AsyncMock(return_value=[]),
         update_user=AsyncMock(return_value=existing),
         reset_user_devices=AsyncMock(),
     )

@@ -15,6 +15,15 @@ class TelegramAuthRequest(BaseModel):
     referral_code: str | None = Field(
         None, max_length=32, pattern=r'^[a-zA-Z0-9_-]+$', description='Referral code of inviter'
     )
+    accepted_legal_documents: list[str] | None = Field(
+        None,
+        max_length=8,
+        description=(
+            'Ключи документов, с которыми пользователь согласился на экране первой авторизации '
+            '(см. GET /cabinet/info/legal-consent). Нужны только при создании НОВОГО аккаунта; '
+            'для существующего игнорируются.'
+        ),
+    )
 
 
 class TelegramWidgetAuthRequest(BaseModel):
@@ -33,6 +42,15 @@ class TelegramWidgetAuthRequest(BaseModel):
     referral_code: str | None = Field(
         None, max_length=32, pattern=r'^[a-zA-Z0-9_-]+$', description='Referral code of inviter'
     )
+    accepted_legal_documents: list[str] | None = Field(
+        None,
+        max_length=8,
+        description=(
+            'Ключи документов, с которыми пользователь согласился на экране первой авторизации '
+            '(см. GET /cabinet/info/legal-consent). Нужны только при создании НОВОГО аккаунта; '
+            'для существующего игнорируются.'
+        ),
+    )
 
 
 class TelegramOIDCAuthRequest(BaseModel):
@@ -44,6 +62,15 @@ class TelegramOIDCAuthRequest(BaseModel):
     )
     referral_code: str | None = Field(
         None, max_length=32, pattern=r'^[a-zA-Z0-9_-]+$', description='Referral code of inviter'
+    )
+    accepted_legal_documents: list[str] | None = Field(
+        None,
+        max_length=8,
+        description=(
+            'Ключи документов, с которыми пользователь согласился на экране первой авторизации '
+            '(см. GET /cabinet/info/legal-consent). Нужны только при создании НОВОГО аккаунта; '
+            'для существующего игнорируются.'
+        ),
     )
 
 
@@ -141,6 +168,14 @@ class EmailRegisterStandaloneRequest(BaseModel):
     campaign_slug: str | None = Field(
         None, min_length=1, max_length=64, pattern=r'^[a-zA-Z0-9_-]+$', description='Campaign slug from web link'
     )
+    accepted_legal_documents: list[str] | None = Field(
+        None,
+        max_length=8,
+        description=(
+            'Ключи документов, с которыми пользователь согласился на экране первой авторизации '
+            '(см. GET /cabinet/info/legal-consent).'
+        ),
+    )
 
 
 class CampaignBonusInfo(BaseModel):
@@ -182,6 +217,12 @@ class EmailChangeVerifyRequest(BaseModel):
     """Request to verify email change with code."""
 
     code: str = Field(..., min_length=6, max_length=6, pattern=r'^\d{6}$', description='6-digit verification code')
+
+
+class EmailMergeVerifyRequest(BaseModel):
+    """Request to confirm an email account merge with the emailed code."""
+
+    code: str = Field(..., min_length=6, max_length=6, pattern=r'^\d{6}$', description='6-digit confirmation code')
 
 
 class EmailChangeResponse(BaseModel):

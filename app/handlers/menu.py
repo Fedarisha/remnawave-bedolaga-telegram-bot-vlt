@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database.crud.info_pages import get_all_info_pages, get_info_page_by_id
 from app.database.crud.promo_group import (
     get_auto_assign_promo_groups,
     has_auto_assign_promo_groups,
@@ -16,7 +17,7 @@ from app.database.crud.promo_group import (
 from app.database.crud.transaction import get_user_total_spent_kopeks
 from app.database.crud.user import update_user
 from app.database.crud.user_message import get_random_active_message
-from app.database.models import PromoGroup, User
+from app.database.models import InfoPage, PromoGroup, User
 from app.handlers.subscription.traffic import add_traffic, handle_add_traffic
 from app.keyboards.inline import (
     get_info_menu_keyboard,
@@ -34,13 +35,17 @@ from app.services.subscription_checkout_service import (
 )
 from app.services.support_settings_service import SupportSettingsService
 from app.services.user_cart_service import user_cart_service
+from app.utils.display_mode import is_visible_in_bot
 from app.utils.photo_message import edit_or_answer_photo
 from app.utils.pricing_utils import format_period_description
 from app.utils.promo_offer import (
     build_promo_offer_hint,
     build_test_access_hint,
+    get_user_active_promo_discount_percent,
 )
+from app.utils.rich_menu import try_edit_rich_main_menu
 from app.utils.subscription_utils import get_cabinet_web_link_block
+from app.utils.telegram_html import html_to_telegram, info_page_faq_to_telegram, split_telegram_text
 from app.utils.timezone import format_local_datetime
 
 
@@ -56,6 +61,27 @@ def _format_rubles(amount_kopeks: int) -> str:
         formatted = f'{rubles:,.2f}'
 
     return f'{formatted.replace(",", " ")} ₽'
+
+
+def _resolve_info_page_text(values: dict | None, language: str) -> str:
+    data = values or {}
+    lang = (language or settings.DEFAULT_LANGUAGE or 'ru').split('-')[0].lower()
+    default_lang = (settings.DEFAULT_LANGUAGE or 'ru').split('-')[0].lower()
+    for candidate in (lang, default_lang, 'ru', 'en'):
+        value = data.get(candidate)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for value in data.values():
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ''
+
+
+def _resolve_info_page_title(page: InfoPage, language: str) -> str:
+    title = _resolve_info_page_text(page.title, language) or page.slug
+    if page.icon:
+        return f'{page.icon} {title}'
+    return title
 
 
 def _collect_period_discounts(group: PromoGroup) -> dict[int, int]:
@@ -175,8 +201,6 @@ async def show_main_menu(
     has_active_subscription = any(sub.is_active or getattr(sub, 'actual_status', None) == 'limited' for sub in _subs)
     subscription_is_active = has_active_subscription
 
-    menu_text = await get_main_menu_text(db_user, texts, db)
-
     draft_exists = await has_subscription_checkout_draft(db_user.id)
     show_resume_checkout = should_offer_checkout_resume(db_user, draft_exists)
 
@@ -220,12 +244,14 @@ async def show_main_menu(
         custom_buttons=custom_buttons,
     )
 
-    await edit_or_answer_photo(
-        callback=callback,
-        caption=menu_text,
-        keyboard=keyboard,
-        parse_mode='HTML',
-    )
+    if not await try_edit_rich_main_menu(callback, db_user, texts, db, keyboard):
+        menu_text = await get_main_menu_text(db_user, texts, db)
+        await edit_or_answer_photo(
+            callback=callback,
+            caption=menu_text,
+            keyboard=keyboard,
+            parse_mode='HTML',
+        )
     if not skip_callback_answer:
         await callback.answer()
 
@@ -262,33 +288,37 @@ async def show_service_rules(callback: types.CallbackQuery, db_user: User, db: A
     from app.database.crud.rules import get_current_rules_content
 
     texts = get_texts(db_user.language)
+
+    if not is_visible_in_bot(settings.SERVICE_RULES_DISPLAY_MODE):
+        await callback.answer(
+            texts.t('INFO_SECTION_NOT_AVAILABLE', 'Раздел временно недоступен.'),
+            show_alert=True,
+        )
+        return
+
     raw_page = 1
     if callback.data and ':' in callback.data:
         try:
             raw_page = int(callback.data.split(':', 1)[1])
         except ValueError:
             raw_page = 1
-
     raw_page = max(raw_page, 1)
+
     rules_text = await get_current_rules_content(db, db_user.language)
 
     if not rules_text:
         rules_text = await get_rules(db_user.language)
 
-    pages = PublicOfferService.split_content_into_pages(rules_text)
-    if not pages:
-        pages = [rules_text]
-
+    # Правила могут быть длиннее лимита Telegram (4096) — пагинация как у
+    # политики конфиденциальности и оферты
+    pages = split_telegram_text(rules_text, max_length=3500) or ['']
     total_pages = len(pages)
     current_page = min(raw_page, total_pages)
 
-    header = texts.t('RULES_HEADER', '📋 <b>Правила сервиса</b>')
-    body = pages[current_page - 1]
-    message_text = f'{header}\n\n{body}'
-    if total_pages > 1:
-        message_text += f'\n\n<code>{current_page}/{total_pages}</code>'
+    message_text = f'{texts.t("RULES_HEADER", "📋 <b>Правила сервиса</b>")}\n\n{pages[current_page - 1]}'
 
     keyboard_rows: list[list[types.InlineKeyboardButton]] = []
+
     if total_pages > 1:
         nav_row: list[types.InlineKeyboardButton] = []
         if current_page > 1:
@@ -298,14 +328,12 @@ async def show_service_rules(callback: types.CallbackQuery, db_user: User, db: A
                     callback_data=f'menu_rules:{current_page - 1}',
                 )
             )
-
         nav_row.append(
             types.InlineKeyboardButton(
                 text=f'{current_page}/{total_pages}',
                 callback_data='noop',
             )
         )
-
         if current_page < total_pages:
             nav_row.append(
                 types.InlineKeyboardButton(
@@ -313,7 +341,6 @@ async def show_service_rules(callback: types.CallbackQuery, db_user: User, db: A
                     callback_data=f'menu_rules:{current_page + 1}',
                 )
             )
-
         keyboard_rows.append(nav_row)
 
     keyboard_rows.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
@@ -321,7 +348,6 @@ async def show_service_rules(callback: types.CallbackQuery, db_user: User, db: A
     await callback.message.edit_text(
         message_text,
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
-        disable_web_page_preview=settings.DISABLE_WEB_PAGE_PREVIEW,
     )
     await callback.answer()
 
@@ -349,10 +375,20 @@ async def show_info_menu(
     prompt = texts.t('MENU_INFO_PROMPT', 'Выберите раздел:')
     caption = f'{header}\n\n{prompt}' if prompt else header
 
-    privacy_enabled = await PrivacyPolicyService.is_policy_enabled(db, db_user.language)
-    public_offer_enabled = await PublicOfferService.is_offer_enabled(db, db_user.language)
-    faq_enabled = await FaqService.is_enabled(db, db_user.language)
+    privacy_enabled = is_visible_in_bot(
+        settings.PRIVACY_POLICY_DISPLAY_MODE
+    ) and await PrivacyPolicyService.is_policy_enabled(db, db_user.language)
+    public_offer_enabled = is_visible_in_bot(
+        settings.PUBLIC_OFFER_DISPLAY_MODE
+    ) and await PublicOfferService.is_offer_enabled(db, db_user.language)
+    faq_enabled = is_visible_in_bot(settings.FAQ_DISPLAY_MODE) and await FaqService.is_enabled(db, db_user.language)
+    rules_enabled = is_visible_in_bot(settings.SERVICE_RULES_DISPLAY_MODE)
     promo_groups_available = await has_auto_assign_promo_groups(db)
+
+    bot_pages = await get_all_info_pages(db, visible_in='bot')
+    custom_pages = [
+        (page.id, _resolve_info_page_title(page, db_user.language)) for page in bot_pages if page.replaces_tab is None
+    ]
 
     await edit_or_answer_photo(
         callback=callback,
@@ -363,6 +399,8 @@ async def show_info_menu(
             show_public_offer=public_offer_enabled,
             show_faq=faq_enabled,
             show_promo_groups=promo_groups_available,
+            show_rules=rules_enabled,
+            custom_pages=custom_pages,
         ),
         parse_mode='HTML',
     )
@@ -536,6 +574,13 @@ async def show_faq_pages(
 
     texts = get_texts(db_user.language)
 
+    if not is_visible_in_bot(settings.FAQ_DISPLAY_MODE):
+        await callback.answer(
+            texts.t('INFO_SECTION_NOT_AVAILABLE', 'Раздел временно недоступен.'),
+            show_alert=True,
+        )
+        return
+
     pages = await FaqService.get_pages(db, db_user.language)
     if not pages:
         await callback.answer(
@@ -592,6 +637,13 @@ async def show_faq_page(
         return
 
     texts = get_texts(db_user.language)
+
+    if not is_visible_in_bot(settings.FAQ_DISPLAY_MODE):
+        await callback.answer(
+            texts.t('INFO_SECTION_NOT_AVAILABLE', 'Раздел временно недоступен.'),
+            show_alert=True,
+        )
+        return
 
     raw_data = callback.data or ''
     parts = raw_data.split(':')
@@ -730,6 +782,13 @@ async def show_privacy_policy(
 
     texts = get_texts(db_user.language)
 
+    if not is_visible_in_bot(settings.PRIVACY_POLICY_DISPLAY_MODE):
+        await callback.answer(
+            texts.t('INFO_SECTION_NOT_AVAILABLE', 'Раздел временно недоступен.'),
+            show_alert=True,
+        )
+        return
+
     raw_page = 1
     if callback.data and ':' in callback.data:
         try:
@@ -847,6 +906,13 @@ async def show_public_offer(
 
     texts = get_texts(db_user.language)
 
+    if not is_visible_in_bot(settings.PUBLIC_OFFER_DISPLAY_MODE):
+        await callback.answer(
+            texts.t('INFO_SECTION_NOT_AVAILABLE', 'Раздел временно недоступен.'),
+            show_alert=True,
+        )
+        return
+
     raw_page = 1
     if callback.data and ':' in callback.data:
         try:
@@ -933,6 +999,103 @@ async def show_public_offer(
                 )
             )
 
+        keyboard_rows.append(nav_row)
+
+    keyboard_rows.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='menu_info')])
+
+    await callback.message.edit_text(
+        message_text,
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
+        disable_web_page_preview=settings.DISABLE_WEB_PAGE_PREVIEW,
+    )
+    await callback.answer()
+
+
+async def show_info_page(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+):
+    if db_user is None:
+        texts = get_texts(settings.DEFAULT_LANGUAGE)
+        await callback.answer(
+            texts.t('USER_NOT_FOUND_ERROR', 'Ошибка: пользователь не найден.'),
+            show_alert=True,
+        )
+        return
+
+    texts = get_texts(db_user.language)
+
+    parts = (callback.data or '').split(':')
+    page_id = None
+    requested_part = 1
+    if len(parts) >= 2:
+        try:
+            page_id = int(parts[1])
+        except ValueError:
+            page_id = None
+    if len(parts) >= 3:
+        try:
+            requested_part = int(parts[2])
+        except ValueError:
+            requested_part = 1
+
+    if not page_id:
+        await callback.answer()
+        return
+
+    page = await get_info_page_by_id(db, page_id)
+    if not page or not page.is_active or not is_visible_in_bot(page.display_mode):
+        await callback.answer(
+            texts.t('INFO_PAGE_NOT_AVAILABLE', 'Эта страница временно недоступна.'),
+            show_alert=True,
+        )
+        return
+
+    raw_content = _resolve_info_page_text(page.content, db_user.language)
+    if page.page_type == 'faq':
+        rendered = info_page_faq_to_telegram(raw_content)
+    else:
+        rendered = html_to_telegram(raw_content)
+
+    chunks = split_telegram_text(rendered, max_length=3500)
+    if not chunks:
+        await callback.answer(
+            texts.t('INFO_PAGE_EMPTY', 'Текст для этой страницы ещё не добавлен.'),
+            show_alert=True,
+        )
+        return
+
+    total_parts = len(chunks)
+    current_part = max(1, min(requested_part, total_parts))
+
+    title = _resolve_info_page_title(page, db_user.language)
+    message_text = f'<b>{html.escape(title)}</b>\n\n{chunks[current_part - 1]}'
+
+    keyboard_rows: list[list[types.InlineKeyboardButton]] = []
+
+    if total_parts > 1:
+        nav_row: list[types.InlineKeyboardButton] = []
+        if current_part > 1:
+            nav_row.append(
+                types.InlineKeyboardButton(
+                    text=texts.t('PAGINATION_PREV', '⬅️'),
+                    callback_data=f'info_page:{page.id}:{current_part - 1}',
+                )
+            )
+        nav_row.append(
+            types.InlineKeyboardButton(
+                text=f'{current_part}/{total_parts}',
+                callback_data='noop',
+            )
+        )
+        if current_part < total_parts:
+            nav_row.append(
+                types.InlineKeyboardButton(
+                    text=texts.t('PAGINATION_NEXT', '➡️'),
+                    callback_data=f'info_page:{page.id}:{current_part + 1}',
+                )
+            )
         keyboard_rows.append(nav_row)
 
     keyboard_rows.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='menu_info')])
@@ -1076,8 +1239,6 @@ async def handle_back_to_menu(callback: types.CallbackQuery, state: FSMContext, 
     has_active_subscription = any(sub.is_active or getattr(sub, 'actual_status', None) == 'limited' for sub in _subs)
     subscription_is_active = has_active_subscription
 
-    menu_text = await get_main_menu_text(db_user, texts, db)
-
     draft_exists = await has_subscription_checkout_draft(db_user.id)
     show_resume_checkout = should_offer_checkout_resume(db_user, draft_exists)
 
@@ -1121,12 +1282,14 @@ async def handle_back_to_menu(callback: types.CallbackQuery, state: FSMContext, 
         custom_buttons=custom_buttons,
     )
 
-    await edit_or_answer_photo(
-        callback=callback,
-        caption=menu_text,
-        keyboard=keyboard,
-        parse_mode='HTML',
-    )
+    if not await try_edit_rich_main_menu(callback, db_user, texts, db, keyboard):
+        menu_text = await get_main_menu_text(db_user, texts, db)
+        await edit_or_answer_photo(
+            callback=callback,
+            caption=menu_text,
+            keyboard=keyboard,
+            parse_mode='HTML',
+        )
     await callback.answer()
 
 
@@ -1235,6 +1398,8 @@ async def _get_multi_tariff_status(user, texts, db: AsyncSession) -> tuple[str, 
     from app.database.crud.subscription import get_all_subscriptions_by_user_id
 
     subscriptions = await get_all_subscriptions_by_user_id(db, user.id)
+    # Неоплаченные черновики триала не показываем как существующую подписку
+    subscriptions = [sub for sub in subscriptions if not getattr(sub, 'is_pending_trial', False)]
 
     if not subscriptions:
         return texts.t('SUB_STATUS_NONE', '❌ Отсутствует'), ''
@@ -1581,6 +1746,11 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(show_service_rules, F.data.startswith('menu_rules:'))
 
     dp.callback_query.register(
+        show_service_rules,
+        F.data.startswith('menu_rules:'),
+    )
+
+    dp.callback_query.register(
         show_info_menu,
         F.data == 'menu_info',
     )
@@ -1618,6 +1788,11 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(
         show_public_offer,
         F.data.startswith('menu_public_offer:'),
+    )
+
+    dp.callback_query.register(
+        show_info_page,
+        F.data.startswith('info_page:'),
     )
 
     dp.callback_query.register(show_language_menu, F.data == 'menu_language')

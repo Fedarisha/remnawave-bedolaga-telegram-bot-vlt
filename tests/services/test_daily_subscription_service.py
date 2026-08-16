@@ -98,4 +98,3 @@ async def test_notify_daily_charge_skips_unloaded_tariff_without_lazy_access(
     await service._notify_daily_charge(user, subscription, 500)
 
     assert 'Тариф:' not in captured_message['telegram_message']
-

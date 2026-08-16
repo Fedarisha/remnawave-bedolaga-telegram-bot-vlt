@@ -205,45 +205,48 @@ async def _get_remnawave_api() -> AsyncIterator[RemnaWaveAPI]:
         yield api
 
 
-async def _delete_remnawave_user_with_fallback(remnawave_uuid: str) -> None:
+async def _delete_remnawave_user_with_fallback(remnawave_id: int) -> None:
     """Удаляет пользователя из RemnaWave. При неудаче — деактивирует как fallback."""
     try:
         async with _get_remnawave_api() as api:
-            deleted = await api.delete_user(remnawave_uuid)
-            if deleted:
-                logger.info(
-                    'RemnaWave пользователь удалён при мерже',
-                    remnawave_uuid=remnawave_uuid,
-                )
-            else:
-                logger.warning(
-                    'RemnaWave delete_user вернул False, пробуем disable',
-                    remnawave_uuid=remnawave_uuid,
-                )
-                await api.disable_user(remnawave_uuid)
-                logger.info(
-                    'RemnaWave пользователь деактивирован как fallback при мерже',
-                    remnawave_uuid=remnawave_uuid,
-                )
+            # 3.0.0: DELETE отвечает 204/202 без тела, поля isDeleted больше нет —
+            # успех это отсутствие исключения.
+            await api.delete_user(remnawave_id)
+            logger.info(
+                'RemnaWave пользователь удалён при мерже',
+                remnawave_id=remnawave_id,
+            )
     except Exception:
         logger.warning(
             'Не удалось удалить RemnaWave пользователя, пробуем disable',
-            remnawave_uuid=remnawave_uuid,
+            remnawave_id=remnawave_id,
             exc_info=True,
         )
         try:
             async with _get_remnawave_api() as api:
-                await api.disable_user(remnawave_uuid)
+                await api.disable_user(remnawave_id)
                 logger.info(
                     'RemnaWave пользователь деактивирован как fallback при мерже',
-                    remnawave_uuid=remnawave_uuid,
+                    remnawave_id=remnawave_id,
                 )
         except Exception:
             logger.error(
                 'Не удалось ни удалить, ни деактивировать RemnaWave пользователя',
-                remnawave_uuid=remnawave_uuid,
+                remnawave_id=remnawave_id,
                 exc_info=True,
             )
+
+
+async def flush_remnawave_deletions(remnawave_ids: list[int]) -> None:
+    """Удаляет (или деактивирует как fallback) пользователей RemnaWave.
+
+    Вызывается caller'ом ПОСЛЕ успешного db.commit() мержа: внешнее удаление
+    нельзя откатить вместе с транзакцией, поэтому его откладывают до коммита,
+    чтобы упавший мерж не оставил удалённого юзера в панели при rollback.
+    Каждое удаление изолировано — сбой одного не мешает остальным.
+    """
+    for remnawave_id in remnawave_ids:
+        await _delete_remnawave_user_with_fallback(remnawave_id)
 
 
 async def _sync_transferred_subscriptions_to_panel(
@@ -260,8 +263,8 @@ async def _sync_transferred_subscriptions_to_panel(
     Failures are logged per-subscription but never propagate — panel desync is
     non-fatal and can be fixed by a manual resync later.
     """
-    subs_with_uuid = [s for s in transferred_subs if getattr(s, 'remnawave_uuid', None)]
-    if not subs_with_uuid:
+    subs_with_panel_id = [s for s in transferred_subs if getattr(s, 'remnawave_id', None)]
+    if not subs_with_panel_id:
         return
 
     new_description = settings.format_remnawave_user_description(
@@ -274,10 +277,10 @@ async def _sync_transferred_subscriptions_to_panel(
 
     try:
         async with _get_remnawave_api() as api:
-            for sub in subs_with_uuid:
+            for sub in subs_with_panel_id:
                 try:
                     await api.update_user(
-                        uuid=sub.remnawave_uuid,
+                        user_id=sub.remnawave_id,
                         description=new_description,
                         telegram_id=primary.telegram_id,
                         email=getattr(primary, 'email', None),
@@ -285,14 +288,14 @@ async def _sync_transferred_subscriptions_to_panel(
                     logger.info(
                         'Synced transferred subscription description to panel',
                         subscription_id=sub.id,
-                        remnawave_uuid=sub.remnawave_uuid,
+                        remnawave_id=sub.remnawave_id,
                         primary_user_id=primary.id,
                     )
                 except Exception:
                     logger.warning(
                         'Failed to sync transferred subscription to panel',
                         subscription_id=sub.id,
-                        remnawave_uuid=sub.remnawave_uuid,
+                        remnawave_id=sub.remnawave_id,
                         primary_user_id=primary.id,
                         exc_info=True,
                     )
@@ -300,7 +303,7 @@ async def _sync_transferred_subscriptions_to_panel(
         logger.warning(
             'Failed to connect to RemnaWave API for post-merge sync',
             primary_user_id=primary.id,
-            subscription_count=len(subs_with_uuid),
+            subscription_count=len(subs_with_panel_id),
             exc_info=True,
         )
 
@@ -310,6 +313,7 @@ async def _handle_subscription_merge(
     primary: User,
     secondary: User,
     keep_subscription_from: Literal['primary', 'secondary'],
+    deferred_remnawave_deletions: list[int],
 ) -> None:
     """Обрабатывает мерж подписок между двумя аккаунтами.
 
@@ -323,13 +327,14 @@ async def _handle_subscription_merge(
     # Duplicate tariff_ids are allowed, so do not collapse or expire conflicts here.
     if settings.is_multi_tariff_enabled():
         secondary_subs = list(getattr(secondary, 'subscriptions', None) or [])
-        secondary_legacy_uuid = secondary.remnawave_uuid
+        primary_subs = list(getattr(primary, 'subscriptions', None) or [])
+        secondary_legacy_panel_id = secondary.remnawave_id
 
         transferred: list[Subscription] = []
         if secondary_subs:
             for sub in secondary_subs:
                 sub_tariff_id = getattr(sub, 'tariff_id', None)
-                sub_remnawave_uuid = getattr(sub, 'remnawave_uuid', None)
+                sub_remnawave_id = getattr(sub, 'remnawave_id', None)
 
                 sub.user_id = primary.id
                 transferred.append(sub)
@@ -339,13 +344,13 @@ async def _handle_subscription_merge(
                     tariff_id=sub_tariff_id,
                     from_user=secondary.id,
                     to_user=primary.id,
-                    remnawave_uuid=sub_remnawave_uuid,
+                    remnawave_id=sub_remnawave_id,
                 )
-                if sub_remnawave_uuid and secondary_legacy_uuid and sub_remnawave_uuid == secondary_legacy_uuid:
+                if sub_remnawave_id and secondary_legacy_panel_id and sub_remnawave_id == secondary_legacy_panel_id:
                     logger.warning(
-                        'Transferred subscription remnawave_uuid matches secondary legacy uuid — manual panel review required',
+                        'Transferred subscription remnawave_id matches secondary legacy panel id — manual panel review required',
                         subscription_id=sub.id,
-                        remnawave_uuid=sub_remnawave_uuid,
+                        remnawave_id=sub_remnawave_id,
                         secondary_user_id=secondary.id,
                         primary_user_id=primary.id,
                     )
@@ -359,9 +364,9 @@ async def _handle_subscription_merge(
             # Sync transferred subscriptions in RemnaWave panel so description
             # reflects the primary user (telegramId, username, email).
             await _sync_transferred_subscriptions_to_panel(primary, transferred)
-        # Clean up legacy remnawave_uuid on secondary
-        if secondary.remnawave_uuid:
-            secondary.remnawave_uuid = None
+        # Clean up legacy panel identity on secondary
+        if secondary.remnawave_id:
+            secondary.remnawave_id = None
         return
 
     # Legacy single-subscription mode
@@ -383,9 +388,9 @@ async def _handle_subscription_merge(
 
     # Подписка только у primary — удаляем RemnaWave юзера secondary (если есть)
     if has_primary_sub and not has_secondary_sub:
-        if secondary.remnawave_uuid:
-            await _delete_remnawave_user_with_fallback(secondary.remnawave_uuid)
-            secondary.remnawave_uuid = None
+        if secondary.remnawave_id:
+            deferred_remnawave_deletions.append(secondary.remnawave_id)
+            secondary.remnawave_id = None
         logger.info(
             'Мерж подписок: оставлена подписка primary, secondary не имел подписки',
             primary_id=primary.id,
@@ -397,12 +402,12 @@ async def _handle_subscription_merge(
     if not has_primary_sub and has_secondary_sub:
         assert secondary_sub is not None
         secondary_sub.user_id = primary.id
-        # Переносим remnawave_uuid (clear→flush→assign — unique constraint safety)
-        if secondary.remnawave_uuid:
-            uuid_to_transfer = secondary.remnawave_uuid
-            secondary.remnawave_uuid = None
+        # Переносим remnawave_id (clear→flush→assign — unique constraint safety)
+        if secondary.remnawave_id:
+            panel_id_to_transfer = secondary.remnawave_id
+            secondary.remnawave_id = None
             await db.flush()
-            primary.remnawave_uuid = uuid_to_transfer
+            primary.remnawave_id = panel_id_to_transfer
         await db.flush()
         logger.info(
             'Мерж подписок: перенесена подписка secondary на primary',
@@ -417,9 +422,16 @@ async def _handle_subscription_merge(
 
     if keep_subscription_from == 'secondary':
         # Удаляем подписку primary из RemnaWave
-        if primary.remnawave_uuid:
-            await _delete_remnawave_user_with_fallback(primary.remnawave_uuid)
-            primary.remnawave_uuid = None
+        if primary.remnawave_id:
+            deferred_remnawave_deletions.append(primary.remnawave_id)
+            primary.remnawave_id = None
+        # СБП-автопродление Platega удаляемой подписки отменяем ДО delete: CASCADE
+        # снесёт локальную запись, и Platega продолжила бы списывать в никуда.
+        from app.services.payment.lava import cancel_lava_recurring_for_subscription_safe
+        from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
+
+        await cancel_platega_recurring_for_subscription_safe(db, primary_sub.id, commit=False)
+        await cancel_lava_recurring_for_subscription_safe(db, primary_sub.id, commit=False)
         # Явно удаляем subscription_servers перед подпиской (CASCADE настроен, но делаем явно для ясности)
         await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == primary_sub.id))
         # Удаляем запись подписки primary
@@ -427,12 +439,12 @@ async def _handle_subscription_merge(
         await db.flush()
         # Переносим подписку secondary на primary
         secondary_sub.user_id = primary.id
-        # Переносим remnawave_uuid (clear→flush→assign — unique constraint safety)
-        if secondary.remnawave_uuid:
-            uuid_to_transfer = secondary.remnawave_uuid
-            secondary.remnawave_uuid = None
+        # Переносим remnawave_id (clear→flush→assign — unique constraint safety)
+        if secondary.remnawave_id:
+            panel_id_to_transfer = secondary.remnawave_id
+            secondary.remnawave_id = None
             await db.flush()
-            primary.remnawave_uuid = uuid_to_transfer
+            primary.remnawave_id = panel_id_to_transfer
         # Flush сразу — гарантируем, что DELETE предшествует UPDATE (unique constraint на subscription.user_id)
         await db.flush()
         logger.info(
@@ -443,9 +455,15 @@ async def _handle_subscription_merge(
     else:
         # keep_subscription_from == 'primary' (по умолчанию)
         # Удаляем подписку secondary из RemnaWave
-        if secondary.remnawave_uuid:
-            await _delete_remnawave_user_with_fallback(secondary.remnawave_uuid)
-            secondary.remnawave_uuid = None
+        if secondary.remnawave_id:
+            deferred_remnawave_deletions.append(secondary.remnawave_id)
+            secondary.remnawave_id = None
+        # СБП-автопродление Platega удаляемой подписки отменяем ДО delete (см. выше).
+        from app.services.payment.lava import cancel_lava_recurring_for_subscription_safe
+        from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
+
+        await cancel_platega_recurring_for_subscription_safe(db, secondary_sub.id, commit=False)
+        await cancel_lava_recurring_for_subscription_safe(db, secondary_sub.id, commit=False)
         # Явно удаляем subscription_servers перед подпиской (CASCADE настроен, но делаем явно для ясности)
         await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == secondary_sub.id))
         # Удаляем запись подписки secondary
@@ -465,6 +483,7 @@ async def execute_merge(
     keep_subscription_from: Literal['primary', 'secondary'] = 'primary',
     provider: str | None = None,
     provider_id: str | None = None,
+    deferred_remnawave_deletions: list[int] | None = None,
 ) -> User:
     """Выполняет атомарный мерж двух аккаунтов. Caller отвечает за commit/rollback.
 
@@ -515,6 +534,12 @@ async def execute_merge(
     # Два прохода: сначала очищаем secondary (flush для освобождения unique constraint),
     # затем устанавливаем на primary. Без этого SQLAlchemy может отправить UPDATE primary
     # раньше UPDATE secondary, что вызовет UniqueViolation.
+    # A merge can move or delete subscriptions and panel identities. Keep the
+    # snapshot owner stable until every open grace overlay is restored.
+    from app.services.grace_access_runtime import ensure_no_open_grace_for_users
+
+    await ensure_no_open_grace_for_users(db, (primary_user_id, secondary_user_id))
+
     oauth_transfers: list[tuple[str, object]] = []
     for field in _OAUTH_FIELDS:
         secondary_value = getattr(secondary, field)
@@ -611,8 +636,15 @@ async def execute_merge(
     if secondary.used_promocodes:
         primary.used_promocodes = (primary.used_promocodes or 0) + secondary.used_promocodes
 
+    # Удаления пользователей из RemnaWave откладываем: внешний вызов нельзя
+    # откатить вместе с БД. Если caller передал список — он выполнит удаления
+    # ПОСЛЕ commit; иначе выполняем их в конце, когда вся работа с БД прошла.
+    pending_remnawave_deletions: list[int] = (
+        deferred_remnawave_deletions if deferred_remnawave_deletions is not None else []
+    )
+
     # 5. Мерж подписок
-    await _handle_subscription_merge(db, primary, secondary, keep_subscription_from)
+    await _handle_subscription_merge(db, primary, secondary, keep_subscription_from, pending_remnawave_deletions)
 
     # 6. Переназначение транзакций
     await db.execute(update(Transaction).where(Transaction.user_id == secondary.id).values(user_id=primary.id))
@@ -636,8 +668,35 @@ async def execute_merge(
             )
         )
     )
-    # 8b. Переназначение оставшихся записей
+    # 8b. Переназначение оставшихся записей.
+    # Частичный уникальный индекс uq_referral_earnings_registration_pending
+    # (user_id, referral_id) WHERE reason='referral_registration_pending'. Если оба
+    # аккаунта приглашены одним реферером (или пригласили одного человека), перенос
+    # создаёт дубликат → сначала удаляем коллизии, как в секциях 10c/10h.
+    reg_pending = ReferralEarning.reason == 'referral_registration_pending'
+    # (i) перенос user_id: убрать pending-строки secondary, дублирующие primary по referral_id
+    primary_pending_referral_ids = select(ReferralEarning.referral_id).where(
+        ReferralEarning.user_id == primary.id, reg_pending
+    )
+    await db.execute(
+        delete(ReferralEarning).where(
+            ReferralEarning.user_id == secondary.id,
+            reg_pending,
+            ReferralEarning.referral_id.in_(primary_pending_referral_ids),
+        )
+    )
     await db.execute(update(ReferralEarning).where(ReferralEarning.user_id == secondary.id).values(user_id=primary.id))
+    # (ii) перенос referral_id: убрать pending-строки secondary, дублирующие primary по user_id
+    primary_pending_user_ids = select(ReferralEarning.user_id).where(
+        ReferralEarning.referral_id == primary.id, reg_pending
+    )
+    await db.execute(
+        delete(ReferralEarning).where(
+            ReferralEarning.referral_id == secondary.id,
+            reg_pending,
+            ReferralEarning.user_id.in_(primary_pending_user_ids),
+        )
+    )
     await db.execute(
         update(ReferralEarning).where(ReferralEarning.referral_id == secondary.id).values(referral_id=primary.id)
     )
@@ -879,9 +938,12 @@ async def execute_merge(
 
     # 14. Помечаем secondary как удалённый и очищаем ВСЕ unique constraint и FK поля
     # NOTE: In multi-tariff mode, all secondary subscriptions were already transferred to primary
-    # in _handle_subscription_merge. Do NOT clear their remnawave_uuid — they are now primary's subs.
+    # in _handle_subscription_merge. Do NOT clear their remnawave_id — they are now primary's subs.
     secondary.status = UserStatus.DELETED.value
     secondary.referral_code = None
+    secondary.remnawave_id = None
+    # Историческая колонка: не читается, но unique — на тумбстоуне обнуляем, чтобы
+    # не держать констрейнт занятым (поведение сохранено с 2.8.x).
     secondary.remnawave_uuid = None
     secondary.referred_by_id = None
     secondary.email = None
@@ -910,5 +972,13 @@ async def execute_merge(
 
     # 15. flush (не commit — caller управляет транзакцией)
     await db.flush()
+
+    # Если caller не взял отложенные удаления на себя (передал None) — выполняем
+    # их здесь, после ВСЕЙ работы с БД. Сбой мержа выше (IntegrityError и т.п.)
+    # происходит до этой точки, поэтому удалённого в панели юзера при откате не
+    # останется. Идеальный путь (удаление строго после commit) — у caller'а,
+    # передающего список (см. execute_merge_endpoint).
+    if deferred_remnawave_deletions is None:
+        await flush_remnawave_deletions(pending_remnawave_deletions)
 
     return primary

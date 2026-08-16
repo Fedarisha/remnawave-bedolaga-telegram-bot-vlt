@@ -48,17 +48,9 @@ def _build_receipt_telegram_caption(receipt_url: str, receipt_uuid: str, languag
     safe_url = escape(receipt_url)
     safe_uuid = escape(receipt_uuid)
     if _use_russian(language):
-        return (
-            '🧾 <b>Ваш чек сформирован</b>\n\n'
-            f'UUID: <code>{safe_uuid}</code>\n'
-            f'Ссылка на чек:\n{safe_url}'
-        )
+        return f'🧾 <b>Ваш чек сформирован</b>\n\nUUID: <code>{safe_uuid}</code>\nСсылка на чек:\n{safe_url}'
 
-    return (
-        '🧾 <b>Your receipt is ready</b>\n\n'
-        f'UUID: <code>{safe_uuid}</code>\n'
-        f'Receipt link:\n{safe_url}'
-    )
+    return f'🧾 <b>Your receipt is ready</b>\n\nUUID: <code>{safe_uuid}</code>\nReceipt link:\n{safe_url}'
 
 
 def _build_receipt_keyboard(language: str | None, receipt_url: str) -> InlineKeyboardMarkup:
@@ -67,9 +59,7 @@ def _build_receipt_keyboard(language: str | None, receipt_url: str) -> InlineKey
     else:
         button_text = 'Open receipt'
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=button_text, url=receipt_url)]]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=button_text, url=receipt_url)]])
 
 
 def _build_receipt_qr(receipt_url: str) -> BufferedInputFile | None:
@@ -108,7 +98,9 @@ async def _send_receipt_via_email(
 
     cache_key = _delivery_cache_key(receipt_uuid, 'email')
     if await cache.get(cache_key):
-        logger.info('Receipt email already delivered, skipping duplicate send', receipt_uuid=receipt_uuid, to_email=email)
+        logger.info(
+            'Receipt email already delivered, skipping duplicate send', receipt_uuid=receipt_uuid, to_email=email
+        )
         return True
 
     if not email_service.is_configured():

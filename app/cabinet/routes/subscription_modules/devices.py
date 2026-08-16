@@ -13,6 +13,7 @@ POST /subscription/devices/save-cart
 
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import UTC, datetime
 from typing import Any
@@ -43,23 +44,26 @@ from .helpers import _apply_addon_discount, resolve_subscription
 
 logger = structlog.get_logger(__name__)
 
+# Cap inline RemnaWave panel sync on user-facing cabinet requests. The product is
+# committed before the sync, so a slow/unavailable panel must not hold the HTTP
+# response open (the cabinet pay button is bound to the request and would spin
+# after delivery). Past this budget the sync is deferred to remnawave_retry_queue.
+REMNAWAVE_SYNC_TIMEOUT = 10.0
+
 router = APIRouter()
 
 
-def _resolve_panel_uuid(subscription: Subscription | None, user: User) -> str | None:
-    """Resolve RemnaWave panel UUID: per-subscription in multi-tariff, user-level otherwise."""
-    if settings.is_multi_tariff_enabled() and subscription and subscription.remnawave_uuid:
-        return subscription.remnawave_uuid
-    return user.remnawave_uuid
+def _resolve_panel_user_id(subscription: Subscription | None, user: User) -> int | None:
+    """Resolve RemnaWave panel user id: per-subscription in multi-tariff, user-level otherwise.
 
-
-async def _resolve_min_device_limit(db: AsyncSession, subscription: Subscription) -> int:
-    """Return the lowest device limit a user may reduce to."""
-    if subscription.tariff_id:
-        tariff = await get_tariff_by_id(db, subscription.tariff_id)
-        if tariff and tariff.device_limit and tariff.device_limit > 0:
-            return tariff.device_limit
-    return 1
+    Multi-tariff: each subscription is its OWN panel user — return the sub's id
+    and do NOT fall back to ``user.remnawave_id`` when it's null. The fallback
+    would read/operate on another tariff's panel user, making HWID devices/limit
+    look shared across tariffs (баг с общим лимитом «по наименьшему тарифу»).
+    """
+    if settings.is_multi_tariff_enabled() and subscription is not None:
+        return subscription.remnawave_id
+    return user.remnawave_id
 
 
 @router.post('/devices')
@@ -143,7 +147,15 @@ async def purchase_devices_legacy(
         else:
             chargeable_devices = request.devices
 
-    base_total_price = device_price * chargeable_devices
+    # Прорейт по фактическому остатку подписки — как трафик/серверы, без потолка.
+    now = datetime.now(UTC)
+    end_date = subscription.end_date
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=UTC)
+    days_left = max(1, math.ceil((end_date - now).total_seconds() / 86400))
+    base_total_price = int(device_price * chargeable_devices * days_left / 30)
+    if chargeable_devices > 0:
+        base_total_price = max(100, base_total_price)  # Минимум 1 рубль
 
     # Lock user row to prevent TOCTOU on promo-offer state
     from app.database.crud.user import lock_user_for_pricing
@@ -151,7 +163,7 @@ async def purchase_devices_legacy(
     user = await lock_user_for_pricing(db, user.id)
 
     # Apply discount from promo group
-    discount_result = _apply_addon_discount(user, 'devices', base_total_price, 30)
+    discount_result = _apply_addon_discount(user, 'devices', base_total_price, days_left)
     total_price = discount_result['discounted']
     devices_discount_percent = discount_result['percent']
 
@@ -260,18 +272,20 @@ async def purchase_devices_legacy(
     await db.refresh(subscription)
     await db.refresh(user)
 
-    # Sync with RemnaWave
+    # Sync with RemnaWave (time-bounded — see REMNAWAVE_SYNC_TIMEOUT; product is
+    # already committed, defer slow syncs to remnawave_retry_queue).
     try:
         service = SubscriptionService()
         if settings.is_multi_tariff_enabled():
-            _should_create = not subscription.remnawave_uuid
+            _should_create = not subscription.remnawave_id
         else:
-            _should_create = not getattr(user, 'remnawave_uuid', None)
+            _should_create = not getattr(user, 'remnawave_id', None)
 
-        if _should_create:
-            await service.create_remnawave_user(db, subscription)
-        else:
-            await service.update_remnawave_user(db, subscription)
+        async with asyncio.timeout(REMNAWAVE_SYNC_TIMEOUT):
+            if _should_create:
+                await service.create_remnawave_user(db, subscription)
+            else:
+                await service.update_remnawave_user(db, subscription)
     except Exception as e:
         logger.error('Failed to sync devices with RemnaWave (legacy endpoint)', error=e)
         from app.services.remnawave_retry_queue import remnawave_retry_queue
@@ -284,12 +298,11 @@ async def purchase_devices_legacy(
 
     # Отправляем уведомление админам
     try:
-        from aiogram import Bot
-
+        from app.bot_factory import create_bot
         from app.services.admin_notification_service import AdminNotificationService
 
-        if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False) and settings.BOT_TOKEN:
-            bot = Bot(token=settings.BOT_TOKEN)
+        if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False):
+            bot = create_bot()
             try:
                 notification_service = AdminNotificationService(bot)
                 await notification_service.send_subscription_update_notification(
@@ -400,6 +413,10 @@ async def purchase_devices(
 
         days_left = max(1, math.ceil((end_date - now).total_seconds() / 86400))
         total_days = 30  # Base period for device price calculation
+        # Прорейт по фактическому остатку подписки — как трафик/серверы, без потолка.
+        # Устройство активно до конца подписки; на продлении доначисляется через
+        # pricing_engine. (Раньше тут был потолок в 1 месяц — #596757/#587412.)
+        effective_days = days_left
 
         # Устройства в пределах тарифного лимита — бесплатные
         if tariff:
@@ -419,7 +436,7 @@ async def purchase_devices(
 
         # Calculate base price before discount
         base_price_per_month = device_price * chargeable_devices
-        base_price_prorated = int(base_price_per_month * days_left / total_days)
+        base_price_prorated = int(base_price_per_month * effective_days / total_days)
         if chargeable_devices > 0:
             base_price_prorated = max(100, base_price_prorated)  # Minimum 1 ruble
 
@@ -530,18 +547,20 @@ async def purchase_devices(
         await db.commit()
         await db.refresh(subscription)
 
-        # Sync with RemnaWave
+        # Sync with RemnaWave (time-bounded — see REMNAWAVE_SYNC_TIMEOUT; product is
+        # already committed, defer slow syncs to remnawave_retry_queue).
         service = SubscriptionService()
         try:
             if settings.is_multi_tariff_enabled():
-                _should_create = not subscription.remnawave_uuid
+                _should_create = not subscription.remnawave_id
             else:
-                _should_create = not getattr(user, 'remnawave_uuid', None)
+                _should_create = not getattr(user, 'remnawave_id', None)
 
-            if _should_create:
-                await service.create_remnawave_user(db, subscription)
-            else:
-                await service.update_remnawave_user(db, subscription)
+            async with asyncio.timeout(REMNAWAVE_SYNC_TIMEOUT):
+                if _should_create:
+                    await service.create_remnawave_user(db, subscription)
+                else:
+                    await service.update_remnawave_user(db, subscription)
         except Exception as e:
             logger.error('Failed to sync devices with RemnaWave', error=e)
             from app.services.remnawave_retry_queue import remnawave_retry_queue
@@ -570,12 +589,11 @@ async def purchase_devices(
 
         # Отправляем уведомление админам
         try:
-            from aiogram import Bot
-
+            from app.bot_factory import create_bot
             from app.services.admin_notification_service import AdminNotificationService
 
-            if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False) and settings.BOT_TOKEN:
-                bot = Bot(token=settings.BOT_TOKEN)
+            if getattr(settings, 'ADMIN_NOTIFICATIONS_ENABLED', False):
+                bot = create_bot()
                 try:
                     notification_service = AdminNotificationService(bot)
                     await notification_service.send_subscription_update_notification(
@@ -591,6 +609,19 @@ async def purchase_devices(
                     await bot.session.close()
         except Exception as e:
             logger.error('Failed to send admin notification for device purchase', error=e)
+
+        # Yandex.Metrika offline conversion (#558449).
+        try:
+            from app.services import yandex_offline_conv_service as yandex_conv
+
+            # Purchase event fires centrally from create_transaction; here we
+            # only persist the request-body CID synchronously (#558449).
+            await yandex_conv.store_cid_only(
+                user.id,
+                request.yandex_cid,
+            )
+        except Exception as yconv_err:
+            logger.debug('yandex_conv purchase hook failed (non-fatal)', user_id=user.id, error=str(yconv_err))
 
         response: dict[str, Any] = {
             'success': True,
@@ -678,6 +709,9 @@ async def save_devices_cart(
 
     days_left = max(1, math.ceil((end_date - now).total_seconds() / 86400))
     total_days = 30
+    # Прорейт по фактическому остатку подписки — как трафик/серверы, без потолка
+    # (раньше был потолок в 1 месяц — #596757). Доначисление за устройства — на продлении.
+    effective_days = days_left
 
     # Устройства в пределах тарифного лимита — бесплатные
     if tariff:
@@ -695,7 +729,7 @@ async def save_devices_cart(
         else:
             chargeable_devices = request.devices
 
-    base_total_price = int(device_price * chargeable_devices * days_left / total_days)
+    base_total_price = int(device_price * chargeable_devices * effective_days / total_days)
     if chargeable_devices > 0:
         base_total_price = max(100, base_total_price)  # Minimum 1 ruble
 
@@ -792,6 +826,9 @@ async def get_device_price(
 
     days_left = max(1, math.ceil((end_date - now).total_seconds() / 86400))
     total_days = 30
+    # Прорейт по фактическому остатку подписки — как трафик/серверы, без потолка
+    # (раньше был потолок в 1 месяц — #596757). Доначисление за устройства — на продлении.
+    effective_days = days_left
 
     # Устройства в пределах тарифного лимита — бесплатные
     if tariff:
@@ -810,7 +847,7 @@ async def get_device_price(
             chargeable_devices = devices
 
     # Calculate base price before discount (total first, then floor)
-    base_total_price = int(device_price * chargeable_devices * days_left / total_days)
+    base_total_price = int(device_price * chargeable_devices * effective_days / total_days)
     if chargeable_devices > 0:
         base_total_price = max(100, base_total_price)
 
@@ -870,8 +907,8 @@ async def get_devices(
             detail='No subscription found',
         )
 
-    _puuid = _resolve_panel_uuid(subscription, user)
-    if not _puuid:
+    _panel_user_id = _resolve_panel_user_id(subscription, user)
+    if not _panel_user_id:
         return {
             'devices': [],
             'total': 0,
@@ -881,7 +918,7 @@ async def get_devices(
     try:
         service = RemnaWaveService()
         async with service.get_api_client() as api:
-            response = await api.get_user_devices_all(_puuid)
+            response = await api.get_user_devices_all(_panel_user_id)
 
             devices_list = response.get('devices', [])
             # Подтягиваем все локальные alias'ы юзера одним запросом — дешевле
@@ -923,7 +960,10 @@ async def get_devices(
             }
 
     except Exception as e:
-        logger.error('Error fetching devices', error=e)
+        # Панель медленная/недоступна — деградируем мягко (пустой список) и логируем
+        # WARNING, как соседние читатели устройств (device_ownership, miniapp), чтобы
+        # транзиентный таймаут панели не спамил админ-чат ошибками.
+        logger.warning('Failed to load devices from RemnaWave (panel slow/unavailable)', error=str(e)[:200])
         return {
             'devices': [],
             'total': 0,
@@ -1011,25 +1051,35 @@ async def delete_device(
             detail='No subscription found',
         )
 
-    _puuid = _resolve_panel_uuid(subscription, user)
-    if not _puuid:
+    _panel_user_id = _resolve_panel_user_id(subscription, user)
+    if not _panel_user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail='User UUID not found',
+            detail='Panel user not found',
         )
 
     try:
         service = RemnaWaveService()
         async with service.get_api_client() as api:
-            delete_data = {'userUuid': _puuid, 'hwid': hwid}
-            await api._make_request('POST', '/api/hwid/devices/delete', data=delete_data)
+            # Тело запроса в 3.0.0 — {'userId': int, 'hwid': str}; собираем его не
+            # руками, а клиентом: он валидирует идентификатор на границе и
+            # проверяет, что hwid действительно пропал из ответа панели.
+            removed = await api.remove_device(_panel_user_id, hwid)
 
-            return {
-                'success': True,
-                'message': 'Device deleted successfully',
-                'deleted_hwid': hwid,
-            }
+        if not removed:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail='Failed to delete device',
+            )
 
+        return {
+            'success': True,
+            'message': 'Device deleted successfully',
+            'deleted_hwid': hwid,
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error('Error deleting device', error=e)
         raise HTTPException(
@@ -1055,18 +1105,18 @@ async def delete_all_devices(
             detail='No subscription found',
         )
 
-    _puuid = _resolve_panel_uuid(subscription, user)
-    if not _puuid:
+    _panel_user_id = _resolve_panel_user_id(subscription, user)
+    if not _panel_user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail='User UUID not found',
+            detail='Panel user not found',
         )
 
     try:
         service = RemnaWaveService()
         async with service.get_api_client() as api:
             # Get all devices first
-            response = await api.get_user_devices_all(_puuid)
+            response = await api.get_user_devices_all(_panel_user_id)
 
             if not response:
                 return {
@@ -1083,23 +1133,25 @@ async def delete_all_devices(
                     'deleted_count': 0,
                 }
 
-            deleted_count = 0
-            for device in devices_list:
-                device_hwid = device.get('hwid')
-                if device_hwid:
-                    try:
-                        delete_data = {'userUuid': _puuid, 'hwid': device_hwid}
-                        await api._make_request('POST', '/api/hwid/devices/delete', data=delete_data)
-                        deleted_count += 1
-                    except Exception as device_error:
-                        logger.error('Error deleting device', device_hwid=device_hwid, device_error=device_error)
+            # 3.0.0 даёт атомарный `POST /api/hwid/devices/delete-all` — на него
+            # переведены все остальные места. Здесь оставался цикл «по одному
+            # запросу на устройство», и он ко всему прочему возвращал
+            # `success: true` даже когда не удалилось НИ ОДНО устройство.
+            total = len(devices_list)
+            if not await api.reset_user_devices(_panel_user_id):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail='Failed to delete devices',
+                )
 
             return {
                 'success': True,
-                'message': f'Deleted {deleted_count} devices',
-                'deleted_count': deleted_count,
+                'message': f'Deleted {total} devices',
+                'deleted_count': total,
             }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error('Error deleting all devices', error=e)
         raise HTTPException(
@@ -1143,7 +1195,20 @@ async def get_device_reduction_info(
             'connected_devices_count': 0,
         }
 
-    min_device_limit = await _resolve_min_device_limit(db, subscription)
+    # По умолчанию нижняя граница уменьшения — лимит устройств тарифа
+    # (ALLOW_DEVICES_BELOW_TARIFF_LIMIT=True возвращает прежнее поведение с 1).
+    # Тариф грузим явно: ленивый доступ к subscription.tariff в async-сессии
+    # падает MissingGreenlet.
+    from app.utils.subscription_utils import resolve_min_device_limit
+
+    _tariff = None
+    if subscription.tariff_id:
+        from app.database.crud.tariff import get_tariff_by_id
+
+        _tariff = await get_tariff_by_id(db, subscription.tariff_id)
+
+    min_device_limit = resolve_min_device_limit(_tariff)
+
     current_device_limit = subscription.device_limit or 1
 
     # Can't reduce below minimum
@@ -1159,16 +1224,16 @@ async def get_device_reduction_info(
 
     # Get connected devices count
     connected_devices_count = 0
-    _puuid = _resolve_panel_uuid(subscription, user)
-    if _puuid:
+    _panel_user_id = _resolve_panel_user_id(subscription, user)
+    if _panel_user_id:
         try:
             service = RemnaWaveService()
             async with service.get_api_client() as api:
-                response = await api.get_user_devices_all(_puuid)
+                response = await api.get_user_devices_all(_panel_user_id)
                 if response:
                     connected_devices_count = response.get('total', 0)
         except Exception as e:
-            logger.error('Error getting connected devices count', error=e)
+            logger.warning('Failed to get connected devices count (panel slow/unavailable)', error=str(e)[:200])
 
     can_reduce = current_device_limit - min_device_limit
 
@@ -1223,7 +1288,20 @@ async def reduce_devices(
             detail='Device reduction is not available for trial subscriptions',
         )
 
-    min_device_limit = await _resolve_min_device_limit(db, subscription)
+    # По умолчанию нижняя граница уменьшения — лимит устройств тарифа
+    # (ALLOW_DEVICES_BELOW_TARIFF_LIMIT=True возвращает прежнее поведение с 1).
+    # Тариф грузим явно: ленивый доступ к subscription.tariff в async-сессии
+    # падает MissingGreenlet.
+    from app.utils.subscription_utils import resolve_min_device_limit
+
+    _tariff = None
+    if subscription.tariff_id:
+        from app.database.crud.tariff import get_tariff_by_id
+
+        _tariff = await get_tariff_by_id(db, subscription.tariff_id)
+
+    min_device_limit = resolve_min_device_limit(_tariff)
+
     current_device_limit = subscription.device_limit or 1
 
     # Validate new limit
@@ -1242,12 +1320,12 @@ async def reduce_devices(
     # Get connected devices and remove excess (last connected ones)
     connected_devices_count = 0
     devices_removed_count = 0
-    _puuid = _resolve_panel_uuid(subscription, user)
-    if _puuid:
+    _panel_user_id = _resolve_panel_user_id(subscription, user)
+    if _panel_user_id:
         try:
             service = RemnaWaveService()
             async with service.get_api_client() as api:
-                response = await api.get_user_devices_all(_puuid)
+                response = await api.get_user_devices_all(_panel_user_id)
                 if response:
                     devices_list = response.get('devices', [])
                     connected_devices_count = len(devices_list)
@@ -1274,10 +1352,9 @@ async def reduce_devices(
                             device_hwid = device.get('hwid')
                             if device_hwid:
                                 try:
-                                    delete_data = {'userUuid': _puuid, 'hwid': device_hwid}
-                                    await api._make_request('POST', '/api/hwid/devices/delete', data=delete_data)
-                                    devices_removed_count += 1
-                                    logger.info('Removed device for user', device_hwid=device_hwid, user_id=user.id)
+                                    if await api.remove_device(_panel_user_id, device_hwid):
+                                        devices_removed_count += 1
+                                        logger.info('Removed device for user', device_hwid=device_hwid, user_id=user.id)
                                 except Exception as del_error:
                                     logger.error('Error removing device', device_hwid=device_hwid, del_error=del_error)
         except Exception as e:

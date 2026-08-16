@@ -122,9 +122,7 @@ async def _get_existing_migration(db: AsyncSession, old_uuid: str) -> XUiMigrati
     return result.scalars().first()
 
 
-async def _resolve_existing_subscription(
-    db: AsyncSession, user: User, tariff: Tariff
-) -> Subscription | None:
+async def _resolve_existing_subscription(db: AsyncSession, user: User, tariff: Tariff) -> Subscription | None:
     """Возвращает активную подписку пользователя на этом тарифе, если есть.
 
     Для миграции используем только точное совпадение tariff_id, чтобы не

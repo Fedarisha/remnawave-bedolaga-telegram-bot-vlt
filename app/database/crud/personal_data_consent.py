@@ -11,9 +11,7 @@ logger = structlog.get_logger(__name__)
 
 
 async def get_personal_data_consent(db: AsyncSession, language: str) -> PersonalDataConsent | None:
-    result = await db.execute(
-        select(PersonalDataConsent).where(PersonalDataConsent.language == language)
-    )
+    result = await db.execute(select(PersonalDataConsent).where(PersonalDataConsent.language == language))
     return result.scalar_one_or_none()
 
 
