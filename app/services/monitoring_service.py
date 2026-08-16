@@ -1,5 +1,6 @@
 import asyncio
 import html
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -50,9 +51,12 @@ from app.external.remnawave_api import (
     RemnaWaveAPIError,
     RemnaWaveUser,
     UserStatus as RemnaWaveUserStatus,
+    is_user_not_found_error,
 )
 from app.localization.texts import get_texts
+from app.services.grace_access_runtime import update_panel_user_grace_safe
 from app.services.notification_delivery_service import (
+    NotificationType,
     notification_delivery_service,
 )
 from app.services.notification_settings_service import NotificationSettingsService
@@ -68,8 +72,119 @@ from app.utils.subscription_utils import (
 from app.utils.timezone import format_local_datetime
 
 
-# Кулдаун между повторными уведомлениями об автоплатеже с недостаточным балансом (6 часов)
-AUTOPAY_INSUFFICIENT_BALANCE_COOLDOWN_SECONDS: int = 21600
+def resolve_autopay_period_candidate(candidate, tariff) -> int | None:
+    """Return ``candidate`` only if it is a valid renewal period for ``tariff``.
+
+    Validation is **fail-closed**: we never let an unvalidated period drive
+    autopay extension. Resolution order for the allowlist:
+
+    1. ``tariff.get_available_periods()`` if the tariff exists and has any
+       priced periods.
+    2. ``settings.get_available_renewal_periods()`` as the global allowlist
+       (for tariff-less / classic-mode subscriptions, or tariffs with empty
+       ``period_prices``).
+
+    Returns ``None`` for ``candidate`` that is falsy, non-positive, or not in
+    either allowlist — letting the caller fall through to the next tier
+    (typically ``tariff.get_shortest_period()`` and finally the hard 30-day
+    floor).
+    """
+    if not candidate or candidate <= 0:
+        return None
+
+    available_periods: list[int] = []
+    if tariff is not None:
+        try:
+            available_periods = list(tariff.get_available_periods() or [])
+        except Exception:
+            available_periods = []
+
+    if not available_periods:
+        try:
+            available_periods = list(settings.get_available_renewal_periods() or [])
+        except Exception:
+            available_periods = []
+
+    if not available_periods or candidate not in available_periods:
+        return None
+    return candidate
+
+
+@dataclass
+class AutopayFailState:
+    """Per-(subscription, cycle) state for autopay-failure notifications.
+
+    `cycle` is keyed on the subscription's end_date, so a successful renewal
+    (which moves end_date forward) starts a fresh cycle with a fresh count.
+    """
+
+    count: int = 0
+    last_sent_ts: float = 0.0
+    final_sent: bool = False
+
+    def to_dict(self) -> dict:
+        return {'count': self.count, 'last_sent_ts': self.last_sent_ts, 'final_sent': self.final_sent}
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> 'AutopayFailState':
+        if not data:
+            return cls()
+        return cls(
+            count=int(data.get('count', 0)),
+            last_sent_ts=float(data.get('last_sent_ts', 0.0)),
+            final_sent=bool(data.get('final_sent', False)),
+        )
+
+
+def decide_autopay_fail_notification(
+    state: AutopayFailState,
+    hours_left: float,
+    now_ts: float,
+    *,
+    max_notifications: int,
+    final_reminder_hours: int,
+    repeat_interval_hours: int,
+) -> str | None:
+    """Decide whether/what to send on a failed-autopay tick.
+
+    Returns 'first' | 'final' | 'repeat' | None. None means stay silent this tick.
+    Pure function — no I/O — so the full notification policy is unit-testable.
+    """
+    if max_notifications <= 0:
+        return None
+
+    # The final "subscription is about to be disconnected" reminder is the single
+    # most important message, so it must be allowed even when periodic repeats have
+    # already hit the per-cycle cap — it fires exactly once (guarded by final_sent).
+    # No lower 0-bound on hours_left: if a coarse MONITORING_INTERVAL steps past the
+    # window so the tick only lands after end_date, the still-unsent final must go.
+    in_final_window = final_reminder_hours > 0 and hours_left <= final_reminder_hours
+
+    if state.count == 0:
+        # First failure of the cycle. If it already lands inside the final window,
+        # send a single 'final' rather than 'first' then 'final' back-to-back.
+        return 'final' if in_final_window else 'first'
+
+    if in_final_window and not state.final_sent:
+        return 'final'
+
+    if state.count >= max_notifications:
+        return None
+
+    if repeat_interval_hours > 0 and (now_ts - state.last_sent_ts) / 3600.0 >= repeat_interval_hours:
+        return 'repeat'
+
+    return None
+
+
+def apply_autopay_fail_notification(state: AutopayFailState, reason: str, now_ts: float) -> AutopayFailState:
+    """Mutate state to record that a notification with `reason` was just sent."""
+    state.count += 1
+    state.last_sent_ts = now_ts
+    if reason == 'final':
+        state.final_sent = True
+    return state
+
 
 # Размер батча для проверки подписок на каналы (keyset pagination)
 _CHANNEL_CHECK_BATCH_SIZE: int = 100
@@ -89,8 +204,9 @@ class MonitoringService:
         self._notified_users: set[str] = set()
         self._last_cleanup = datetime.now(UTC)
         self._sla_task = None
-        # In-memory fallback для cooldown автоплатежей (на случай недоступности Redis)
-        self._autopay_fail_notified_at: dict[int, datetime] = {}
+        # In-memory fallback состояния уведомлений об ошибке автоплатежа (на случай
+        # недоступности Redis). Ключ — (subscription_id, cycle_token=int(end_date.timestamp())).
+        self._autopay_fail_state: dict[tuple[int, int], dict] = {}
 
     async def _send_message_with_logo(
         self,
@@ -122,28 +238,54 @@ class MonitoringService:
             try:
                 from app.utils.message_patch import _cache_logo_file_id, get_logo_media
 
-                result = await self.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=get_logo_media(),
-                    caption=text,
-                    reply_markup=reply_markup,
-                    parse_mode=parse_mode,
+                # Жёсткий per-send таймаут: без него залипший send_photo (на медленном
+                # канале это особенно вероятно на ПЕРВОЙ отправке цикла, где грузится
+                # файл логотипа ~700КБ — file_id кешируется только после успеха) держит
+                # await до session timeout (60s) на каждого получателя и блокирует хвост
+                # цикла мониторинга. На TimeoutError пропускаем получателя.
+                result = await asyncio.wait_for(
+                    self.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=get_logo_media(),
+                        caption=text,
+                        reply_markup=reply_markup,
+                        parse_mode=parse_mode,
+                    ),
+                    timeout=settings.MONITORING_NOTIFICATION_SEND_TIMEOUT,
                 )
                 _cache_logo_file_id(result)
                 return result
+            except TimeoutError:
+                logger.warning(
+                    'send_photo завис дольше таймаута — пропускаем получателя, цикл продолжается',
+                    chat_id=chat_id,
+                    timeout=settings.MONITORING_NOTIFICATION_SEND_TIMEOUT,
+                )
+                return None
             except TelegramBadRequest as exc:
                 logger.warning(
-                    'Не удалось отправить сообщение с логотипом пользователю : . Отправляем текстовое сообщение.',
+                    'Не удалось отправить сообщение с логотипом, отправляем текстовое сообщение',
                     chat_id=chat_id,
                     exc=exc,
                 )
 
-        return await self.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=parse_mode,
-        )
+        try:
+            return await asyncio.wait_for(
+                self.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                ),
+                timeout=settings.MONITORING_NOTIFICATION_SEND_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning(
+                'send_message завис дольше таймаута — пропускаем получателя, цикл продолжается',
+                chat_id=chat_id,
+                timeout=settings.MONITORING_NOTIFICATION_SEND_TIMEOUT,
+            )
+            return None
 
     @staticmethod
     def _is_unreachable_error(error: TelegramBadRequest) -> bool:
@@ -240,6 +382,13 @@ class MonitoringService:
                             error=recurrent_error,
                             exc_info=True,
                         )
+                # Реконсилиация Platega SBP-подписок: страховка на случай потерянных
+                # коллбеков / зависших PENDING. Гейт внутри метода (PLATEGA_RECURRENT_ENABLED).
+                await self._reconcile_platega_subscriptions(db)
+
+                # Реконсилиация рекуррентных подписок Lava: та же страховка на
+                # случай потерянных вебхуков / недошедших отмен.
+                await self._reconcile_lava_subscriptions(db)
                 await self._check_expired_subscriptions(db)
                 await self._check_expiring_subscriptions(db)
                 await self._check_trial_expiring_soon(db)
@@ -249,6 +398,7 @@ class MonitoringService:
                 await self._check_low_balance_alerts(db)
                 await self._retry_stuck_guest_purchases(db)
                 await self._cleanup_expired_refresh_tokens(db)
+                await self._cleanup_button_click_logs(db)
                 await self._cleanup_inactive_users(db)
                 await self._sync_with_remnawave(db)
 
@@ -281,75 +431,103 @@ class MonitoringService:
             old_count = len(self._notified_users)
             self._notified_users.clear()
 
-            # Чистим просроченные записи cooldown автоплатежей
-            cutoff = current_time - timedelta(seconds=AUTOPAY_INSUFFICIENT_BALANCE_COOLDOWN_SECONDS)
-            expired_ids = [uid for uid, ts in self._autopay_fail_notified_at.items() if ts < cutoff]
-            for uid in expired_ids:
-                del self._autopay_fail_notified_at[uid]
+            # Чистим состояние autopay-fail по протухшим циклам (end_date в прошлом > 72ч)
+            cutoff_ts = (current_time - timedelta(hours=72)).timestamp()
+            expired_keys = [key for key in self._autopay_fail_state if key[1] < cutoff_ts]
+            for key in expired_keys:
+                del self._autopay_fail_state[key]
 
             self._last_cleanup = current_time
             logger.info(
                 '🧹 Очищен кеш уведомлений',
                 old_count=old_count,
-                autopay_cooldown_evicted=len(expired_ids),
-                autopay_cooldown_remaining=len(self._autopay_fail_notified_at),
+                autopay_state_evicted=len(expired_keys),
+                autopay_state_remaining=len(self._autopay_fail_state),
             )
 
-    async def _check_autopay_fail_cooldown(self, user_id: int, user_identifier: str) -> bool:
-        """Проверяет, можно ли отправить уведомление об ошибке автоплатежа.
-
-        Использует Redis как primary хранилище cooldown, с in-memory fallback.
-        Returns True если уведомление можно отправить.
-        """
-        # 1. In-memory fallback (работает даже без Redis)
-        last_notified = self._autopay_fail_notified_at.get(user_id)
-        if last_notified:
-            elapsed = (datetime.now(UTC) - last_notified).total_seconds()
-            if elapsed < AUTOPAY_INSUFFICIENT_BALANCE_COOLDOWN_SECONDS:
-                logger.debug(
-                    'Пропуск уведомления об ошибке автоплатежа — in-memory cooldown активен',
-                    user_identifier=user_identifier,
-                    elapsed_seconds=int(elapsed),
-                )
-                return False
-
-        # 2. Redis check (если доступен)
-        cooldown_key = f'autopay_insufficient_balance_notified:{user_id}'
+    async def _load_autopay_fail_state(self, subscription_id: int, cycle_token: int) -> AutopayFailState:
+        """Load per-cycle autopay-fail state. In-memory first (current within process),
+        Redis as cross-restart source of truth."""
+        mem = self._autopay_fail_state.get((subscription_id, cycle_token))
+        if mem is not None:
+            return AutopayFailState.from_dict(mem)
         try:
-            if await cache.exists(cooldown_key):
-                logger.debug(
-                    'Пропуск уведомления об ошибке автоплатежа — Redis cooldown активен',
-                    user_identifier=user_identifier,
-                )
-                return False
+            data = await cache.get(f'autopay_fail:{subscription_id}:{cycle_token}')
+            if data:
+                return AutopayFailState.from_dict(data)
         except Exception as redis_err:
             logger.warning(
-                'Ошибка проверки cooldown в Redis, используем in-memory fallback',
-                user_identifier=user_identifier,
+                'Ошибка чтения состояния autopay-fail из Redis, in-memory fallback',
+                subscription_id=subscription_id,
                 redis_err=redis_err,
             )
+        return AutopayFailState()
 
-        return True
-
-    async def _set_autopay_fail_cooldown(self, user_id: int, user_identifier: str) -> None:
-        """Устанавливает cooldown после отправки уведомления об ошибке автоплатежа."""
-        # In-memory (всегда)
-        self._autopay_fail_notified_at[user_id] = datetime.now(UTC)
-
-        # Redis (если доступен)
-        cooldown_key = f'autopay_insufficient_balance_notified:{user_id}'
+    async def _save_autopay_fail_state(
+        self, subscription_id: int, cycle_token: int, state: AutopayFailState, ttl_seconds: int
+    ) -> None:
+        """Persist state to in-memory (always) and Redis (best effort)."""
+        self._autopay_fail_state[(subscription_id, cycle_token)] = state.to_dict()
         try:
             await cache.set(
-                cooldown_key,
-                1,
-                expire=AUTOPAY_INSUFFICIENT_BALANCE_COOLDOWN_SECONDS,
+                f'autopay_fail:{subscription_id}:{cycle_token}',
+                state.to_dict(),
+                expire=max(ttl_seconds, 60),
             )
         except Exception as redis_err:
             logger.warning(
-                'Не удалось установить cooldown в Redis, in-memory fallback активен',
-                user_identifier=user_identifier,
+                'Не удалось сохранить состояние autopay-fail в Redis, in-memory fallback активен',
+                subscription_id=subscription_id,
                 redis_err=redis_err,
             )
+
+    async def _maybe_notify_autopay_failure(
+        self,
+        user,
+        charge_amount: int,
+        subscription,
+        current_time: datetime,
+        *,
+        cause: str = 'insufficient_balance',
+    ) -> None:
+        """Send an autopay-failure notification iff policy allows it this tick, then
+        record state. Policy = decide_autopay_fail_notification() + AUTOPAY_FAIL_* config.
+
+        `cause` ('charge_error' | 'insufficient_balance') selects the email/non-Telegram
+        reason wording so a non-balance charge failure isn't mislabelled as low balance."""
+        cycle_token = int(subscription.end_date.timestamp())
+        now_ts = current_time.timestamp()
+        hours_left = (subscription.end_date - current_time).total_seconds() / 3600.0
+
+        state = await self._load_autopay_fail_state(subscription.id, cycle_token)
+        reason = decide_autopay_fail_notification(
+            state,
+            hours_left,
+            now_ts,
+            max_notifications=settings.AUTOPAY_FAIL_MAX_NOTIFICATIONS,
+            final_reminder_hours=settings.AUTOPAY_FAIL_FINAL_REMINDER_HOURS,
+            repeat_interval_hours=settings.AUTOPAY_FAIL_REPEAT_INTERVAL_HOURS,
+        )
+        if reason is None:
+            return
+
+        is_final = reason == 'final'
+        if user.telegram_id and self.bot:
+            await self._send_autopay_failed_notification(
+                user, user.balance_kopeks, charge_amount, subscription=subscription, is_final=is_final
+            )
+        elif not user.telegram_id:
+            if is_final:
+                reason_text = 'Последнее напоминание: подписка скоро отключится — недостаточно средств'
+            elif cause == 'charge_error':
+                reason_text = 'Ошибка списания средств'
+            else:
+                reason_text = 'Недостаточно средств на балансе'
+            await notification_delivery_service.notify_autopay_failed(user=user, reason=reason_text)
+
+        apply_autopay_fail_notification(state, reason, now_ts)
+        ttl_seconds = int(max(0.0, hours_left) * 3600) + 72 * 3600
+        await self._save_autopay_fail_state(subscription.id, cycle_token, state, ttl_seconds)
 
     async def _check_expired_subscriptions(self, db: AsyncSession):
         try:
@@ -417,15 +595,15 @@ class MonitoringService:
                 return None
 
             user = await get_user_by_id(db, subscription.user_id)
-            remnawave_uuid = (
-                subscription.remnawave_uuid
-                if settings.is_multi_tariff_enabled() and getattr(subscription, 'remnawave_uuid', None)
-                else user.remnawave_uuid
+            panel_user_id = (
+                subscription.remnawave_id
+                if settings.is_multi_tariff_enabled() and getattr(subscription, 'remnawave_id', None) is not None
+                else user.remnawave_id
                 if user
                 else None
             )
-            if not user or not remnawave_uuid:
-                logger.error('RemnaWave UUID не найден для пользователя', user_id=subscription.user_id)
+            if not user or panel_user_id is None:
+                logger.error('RemnaWave id не найден для пользователя', user_id=subscription.user_id)
                 return None
 
             # Обновляем subscription в сессии, чтобы избежать detached instance
@@ -475,12 +653,15 @@ class MonitoringService:
                 hwid_limit = resolve_hwid_device_limit_for_payload(subscription)
 
                 update_kwargs = dict(
-                    uuid=remnawave_uuid,
+                    user_id=panel_user_id,
                     status=RemnaWaveUserStatus.ACTIVE if is_active else RemnaWaveUserStatus.DISABLED,
                     expire_at=subscription.end_date
                     if is_active
                     else max(subscription.end_date, current_time + timedelta(minutes=1)),
-                    traffic_limit_bytes=self._gb_to_bytes(subscription.traffic_limit_gb),
+                    # _gb_to_bytes живёт в SubscriptionService — у MonitoringService своего
+                    # никогда не было, и self._gb_to_bytes ронял весь метод AttributeError-ом
+                    # ещё до запроса в панель (молча гасился общим except → return None).
+                    traffic_limit_bytes=self.subscription_service._gb_to_bytes(subscription.traffic_limit_gb),
                     traffic_limit_strategy=get_traffic_reset_strategy(subscription.tariff),
                     description=settings.format_remnawave_user_description(
                         full_name=user.full_name, username=user.username, telegram_id=user.telegram_id
@@ -496,7 +677,11 @@ class MonitoringService:
                 # Внешний сквад НЕ пересылаем в рутинном sync — стейловый UUID
                 # вызывает FK violation → A039. Назначается при создании подписки.
 
-                updated_user = await api.update_user(**update_kwargs)
+                updated_user = await update_panel_user_grace_safe(
+                    api,
+                    subscription.id,
+                    **update_kwargs,
+                )
 
                 subscription.subscription_url = updated_user.subscription_url
                 subscription.subscription_crypto_link = updated_user.happ_crypto_link
@@ -505,12 +690,19 @@ class MonitoringService:
                 status_text = 'активным' if is_active else 'истёкшим'
                 logger.info(
                     '✅ Обновлен RemnaWave пользователь со статусом',
-                    remnawave_uuid=remnawave_uuid,
+                    remnawave_id=panel_user_id,
                     status_text=status_text,
                 )
                 return updated_user
 
         except RemnaWaveAPIError as e:
+            if is_user_not_found_error(e):
+                # Пользователя удалили из панели при живой подписке в боте —
+                # пересоздаём (create-флоу сохранит новый id панели и ссылки в подписку).
+                # RemnaWaveInvalidUserIdError сюда намеренно не попадает: битый
+                # локальный идентификатор — баг в данных бота, а не «юзера нет»,
+                # и уход в пересоздание плодил бы дубли в панели.
+                return await self.subscription_service.recreate_deleted_panel_user(db, subscription)
             logger.error('Ошибка обновления RemnaWave пользователя', error=e)
             return None
         except Exception as e:
@@ -802,14 +994,29 @@ class MonitoringService:
 
                         checked_count += 1
 
-                        # Rate-limited check for ALL channels
+                        # Rate-limited check for ALL channels.
+                        # _rate_limited_check returns Optional[bool] — None means
+                        # "could not determine" (network blip, double rate-limit,
+                        # generic exception). Treat None as "keep the last known
+                        # value" and never feed it into the deactivation path —
+                        # closes the same regression #313502 covered for the
+                        # request-time middleware. This background reconciler
+                        # would otherwise still flip annual paid subs to DISABLED
+                        # on the very next monitoring tick after a transient
+                        # Telegram API hiccup.
                         all_subscribed = True
                         unsubscribed_channels: list[dict] = []
                         for ch in channels:
-                            is_member = await channel_subscription_service._rate_limited_check(
+                            check_result = await channel_subscription_service._rate_limited_check(
                                 user.telegram_id, ch['channel_id']
                             )
-                            # Update DB + cache
+                            if check_result is None:
+                                # Skip DB/cache writes and don't mark as unsubscribed —
+                                # the next reconciler tick (or the next user
+                                # interaction in the request path) will retry.
+                                continue
+                            is_member = check_result
+                            # Update DB + cache only when we have a definitive answer
                             await upsert_user_channel_sub(batch_db, user.telegram_id, ch['channel_id'], is_member)
                             await ChannelSubCache.set_sub_status(user.telegram_id, ch['channel_id'], is_member)
 
@@ -839,18 +1046,18 @@ class MonitoringService:
                                 is_trial=subscription.is_trial,
                             )
 
-                            panel_uuid = (
-                                subscription.remnawave_uuid
-                                if settings.is_multi_tariff_enabled() and subscription.remnawave_uuid
-                                else user.remnawave_uuid
+                            panel_user_id = (
+                                subscription.remnawave_id
+                                if settings.is_multi_tariff_enabled() and subscription.remnawave_id is not None
+                                else user.remnawave_id
                             )
-                            if panel_uuid:
+                            if panel_user_id is not None:
                                 try:
-                                    await self.subscription_service.disable_remnawave_user(panel_uuid)
+                                    await self.subscription_service.disable_remnawave_user(panel_user_id)
                                 except Exception as api_error:
                                     logger.error(
                                         'Failed to disable RemnaWave user',
-                                        remnawave_uuid=panel_uuid,
+                                        remnawave_id=panel_user_id,
                                         api_error=api_error,
                                     )
 
@@ -917,9 +1124,9 @@ class MonitoringService:
 
                             try:
                                 if settings.is_multi_tariff_enabled():
-                                    _should_create = not subscription.remnawave_uuid
+                                    _should_create = subscription.remnawave_id is None
                                 else:
-                                    _should_create = not getattr(user, 'remnawave_uuid', None)
+                                    _should_create = getattr(user, 'remnawave_id', None) is None
 
                                 if _should_create:
                                     # create_remnawave_user calls db.commit() internally --
@@ -927,13 +1134,13 @@ class MonitoringService:
                                     await batch_db.commit()
                                     await self.subscription_service.create_remnawave_user(batch_db, subscription)
                                 else:
-                                    _enable_uuid = (
-                                        subscription.remnawave_uuid
+                                    _enable_panel_user_id = (
+                                        subscription.remnawave_id
                                         if settings.is_multi_tariff_enabled()
-                                        else user.remnawave_uuid
+                                        else user.remnawave_id
                                     )
-                                    if _enable_uuid:
-                                        await self.subscription_service.enable_remnawave_user(_enable_uuid)
+                                    if _enable_panel_user_id is not None:
+                                        await self.subscription_service.enable_remnawave_user(_enable_panel_user_id)
                             except Exception as api_error:
                                 logger.error(
                                     'Failed to update RemnaWave user',
@@ -1283,12 +1490,22 @@ class MonitoringService:
 
                     user_identifier = user.telegram_id or f'email:{user.id}'
 
-                    # Определяем период продления: из тарифа (минимальный) или 30 дней по умолчанию
+                    # Период продления выбирается с такой иерархией:
+                    #   1. subscription.autopay_period_days — выбор пользователя/админа
+                    #   2. settings.DEFAULT_AUTOPAY_PERIOD_DAYS — глобальный дефолт из .env
+                    #   3. tariff.get_shortest_period() — самый дешёвый период тарифа (legacy)
+                    #   4. 30 — финальный fallback, если тарифа нет
+                    # resolve_autopay_period_candidate работает fail-closed: пропускает только
+                    # значения из tariff.get_available_periods() или (для классических подписок
+                    # без тарифа) settings.get_available_renewal_periods().
                     tariff = getattr(subscription, 'tariff', None)
-                    if tariff:
-                        autopay_period = tariff.get_shortest_period() or 30
-                    else:
-                        autopay_period = 30
+
+                    autopay_period = (
+                        resolve_autopay_period_candidate(getattr(subscription, 'autopay_period_days', None), tariff)
+                        or resolve_autopay_period_candidate(getattr(settings, 'DEFAULT_AUTOPAY_PERIOD_DAYS', 0), tariff)
+                        or (tariff.get_shortest_period() if tariff else None)
+                        or 30
+                    )
 
                     try:
                         from app.database.crud.user import lock_user_for_pricing
@@ -1376,13 +1593,56 @@ class MonitoringService:
                                     user_id=user.id,
                                 )
                             old_end_date = subscription.end_date
-                            await extend_subscription(db, subscription, autopay_period)
-                            await self.subscription_service.update_remnawave_user(
-                                db,
-                                subscription,
-                                reset_traffic=settings.RESET_TRAFFIC_ON_PAYMENT,
-                                reset_reason='автопродление подписки',
-                            )
+                            try:
+                                await extend_subscription(db, subscription, autopay_period)
+                            except Exception as extend_exc:
+                                # Баланс уже списан и закоммичен в subtract_user_balance выше.
+                                # Само продление упало → компенсирующий возврат, иначе деньги
+                                # пропадают без продления (как и делает _auto_extend_subscription).
+                                logger.error(
+                                    '🔴 Автопродление: extend_subscription упал — возвращаю списанное',
+                                    user_id=user.id,
+                                    subscription_id=subscription.id,
+                                    exc=extend_exc,
+                                )
+                                try:
+                                    from app.database.crud.user import add_user_balance
+                                    from app.database.models import TransactionType as _TxType
+
+                                    await add_user_balance(
+                                        db,
+                                        user,
+                                        charge_amount,
+                                        'Возврат: автопродление не удалось',
+                                        transaction_type=_TxType.REFUND,
+                                        create_transaction=True,
+                                    )
+                                except Exception as refund_exc:
+                                    logger.critical(
+                                        '🔴🔴 Автопродление: НЕ УДАЛОСЬ вернуть списанное — нужно ручное вмешательство',
+                                        user_id=user.id,
+                                        charge_amount=charge_amount,
+                                        exc=refund_exc,
+                                    )
+                                failed_count += 1
+                                continue
+
+                            # Синк панели — лучшее-усилие: продление уже в БД, при сбое не возвращаем,
+                            # а полагаемся на очередь повтора синка.
+                            try:
+                                await self.subscription_service.update_remnawave_user(
+                                    db,
+                                    subscription,
+                                    reset_traffic=settings.RESET_TRAFFIC_ON_PAYMENT,
+                                    reset_reason='автопродление подписки',
+                                )
+                            except Exception as sync_exc:
+                                logger.error(
+                                    'Автопродление: ошибка синка RemnaWave (продление уже применено в БД)',
+                                    user_id=user.id,
+                                    subscription_id=subscription.id,
+                                    exc=sync_exc,
+                                )
 
                             # Создаём транзакцию, чтобы автопродление было видно в статистике и карточке пользователя
                             try:
@@ -1446,36 +1706,16 @@ class MonitoringService:
                             )
                         else:
                             failed_count += 1
-                            if await self._check_autopay_fail_cooldown(user.id, user_identifier):
-                                if user.telegram_id and self.bot:
-                                    await self._send_autopay_failed_notification(
-                                        user, user.balance_kopeks, charge_amount, subscription=subscription
-                                    )
-                                elif not user.telegram_id:
-                                    await notification_delivery_service.notify_autopay_failed(
-                                        user=user,
-                                        reason='Ошибка списания средств',
-                                    )
-                                await self._set_autopay_fail_cooldown(user.id, user_identifier)
+                            await self._maybe_notify_autopay_failure(
+                                user, charge_amount, subscription, current_time, cause='charge_error'
+                            )
                             logger.warning(
                                 '💳 Ошибка списания средств для автопродления пользователя',
                                 user_identifier=user_identifier,
                             )
                     else:
                         failed_count += 1
-
-                        if await self._check_autopay_fail_cooldown(user.id, user_identifier):
-                            if user.telegram_id and self.bot:
-                                await self._send_autopay_failed_notification(
-                                    user, user.balance_kopeks, charge_amount, subscription=subscription
-                                )
-                            elif not user.telegram_id:
-                                await notification_delivery_service.notify_autopay_failed(
-                                    user=user,
-                                    reason='Недостаточно средств на балансе',
-                                )
-                            await self._set_autopay_fail_cooldown(user.id, user_identifier)
-
+                        await self._maybe_notify_autopay_failure(user, charge_amount, subscription, current_time)
                         logger.warning(
                             '💳 Недостаточно средств для автопродления у пользователя',
                             user_identifier=user_identifier,
@@ -1517,6 +1757,12 @@ class MonitoringService:
         self, user: User, subscription: Subscription, *, tariff_name: str | None = None
     ) -> bool:
         try:
+            if not user.telegram_id:
+                return await notification_delivery_service.send_notification(
+                    user=user,
+                    notification_type=NotificationType.SUBSCRIPTION_EXPIRED,
+                    context={'tariff_name': tariff_name or ''},
+                )
             tariff_label = ''
             if settings.is_multi_tariff_enabled():
                 if tariff_name:
@@ -1619,6 +1865,9 @@ class MonitoringService:
                 '💳 <b>Автоплатеж:</b> {autopay_status}\n\n'
                 '{action_text}\n',
             ).format(
+                # Кастомные/старые локали используют {days} вместо {days_text} —
+                # передаём оба, иначе .format() падает с KeyError('days') (#2737).
+                days=days,
                 days_text=days_text,
                 end_date=end_date,
                 autopay_status=autopay_status,
@@ -1682,6 +1931,12 @@ class MonitoringService:
 
     async def _send_trial_ending_notification(self, user: User, subscription: Subscription) -> bool:
         try:
+            if not user.telegram_id:
+                return await notification_delivery_service.send_notification(
+                    user=user,
+                    notification_type=NotificationType.WINBACK_TRIAL_ENDING,
+                    context={},
+                )
             get_texts(user.language)
 
             tariff_label = ''
@@ -1813,6 +2068,12 @@ class MonitoringService:
 
     async def _send_expired_day1_notification(self, db: AsyncSession, user: User, subscription: Subscription) -> bool:
         try:
+            if not user.telegram_id:
+                return await notification_delivery_service.send_notification(
+                    user=user,
+                    notification_type=NotificationType.WINBACK_EXPIRED_1D,
+                    context={'end_date': format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M')},
+                )
             texts = get_texts(user.language)
             tariff = getattr(subscription, 'tariff', None)
             tariff_label = ''
@@ -1912,6 +2173,16 @@ class MonitoringService:
         trigger_days: int = None,
     ) -> bool:
         try:
+            if not user.telegram_id:
+                return await notification_delivery_service.send_notification(
+                    user=user,
+                    notification_type=NotificationType.WINBACK_DISCOUNT,
+                    context={
+                        'percent': percent,
+                        'expires_at': format_local_datetime(expires_at, '%d.%m.%Y %H:%M'),
+                        'trigger_days': trigger_days or '',
+                    },
+                )
             texts = get_texts(user.language)
 
             tariff_label = ''
@@ -2035,13 +2306,27 @@ class MonitoringService:
             logger.error('Ошибка отправки уведомления об автоплатеже пользователю', telegram_id=user.telegram_id, e=e)
 
     async def _send_autopay_failed_notification(
-        self, user: User, balance: int, required: int, *, subscription: Subscription | None = None
+        self,
+        user: User,
+        balance: int,
+        required: int,
+        *,
+        subscription: Subscription | None = None,
+        is_final: bool = False,
     ):
         try:
             texts = get_texts(user.language)
-            message = texts.AUTOPAY_FAILED.format(
-                balance=settings.format_price(balance), required=settings.format_price(required)
-            )
+            if is_final:
+                template = texts.t(
+                    'AUTOPAY_FAILED_FINAL',
+                    '\n⏰ <b>Последнее напоминание</b>\n\n'
+                    'Подписка скоро отключится — автоплатёж не прошёл из-за нехватки средств.\n'
+                    'Баланс: {balance}\nТребуется: {required}\n\n'
+                    'Пополните баланс сейчас, чтобы не потерять доступ.\n',
+                )
+            else:
+                template = texts.AUTOPAY_FAILED
+            message = template.format(balance=settings.format_price(balance), required=settings.format_price(required))
             if (
                 settings.is_multi_tariff_enabled()
                 and subscription
@@ -2346,6 +2631,34 @@ class MonitoringService:
             except Exception:
                 pass
 
+    async def _cleanup_button_click_logs(self, db: AsyncSession):
+        """Чистит старые записи лога действий юзеров (USER_ACTION_LOG_RETENTION_DAYS)."""
+        try:
+            retention_days = settings.USER_ACTION_LOG_RETENTION_DAYS
+            if retention_days <= 0:
+                return
+
+            now = datetime.now(UTC)
+            if now.hour != 4:
+                return
+
+            from sqlalchemy import delete
+
+            from app.database.models import ButtonClickLog
+
+            stmt = delete(ButtonClickLog).where(ButtonClickLog.clicked_at < now - timedelta(days=retention_days))
+            result = await db.execute(stmt)
+            deleted = result.rowcount
+            if deleted > 0:
+                await db.commit()
+                logger.info('Очищены старые записи лога действий', deleted_count=deleted)
+        except Exception as error:
+            logger.error('Ошибка очистки лога действий', error=error)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
     async def _cleanup_inactive_users(self, db: AsyncSession):
         try:
             now = datetime.now(UTC)
@@ -2402,6 +2715,227 @@ class MonitoringService:
                 is_success=False,
             )
 
+    async def _reconcile_platega_subscriptions(self, db: AsyncSession):
+        """Safety net for Platega SBP-подписок: сверяет локальный статус с
+        Platega, если коллбек потерялся или запись зависла в PENDING; добивает
+        недошедшие отмены и доначисляет пропущенные списания.
+        Best-effort — ошибки (общие и по отдельной записи) никогда не
+        прерывают цикл мониторинга.
+
+        НЕ гейтится PLATEGA_RECURRENT_ENABLED намеренно: выключение фичи не
+        останавливает существующие привязки — Platega продолжает списывать и
+        слать коллбеки, а cancel-операции разгейчены на всех поверхностях.
+        Гейт здесь заморозил бы ретраи недошедших отмен (cancelled-свип) и
+        доначисление пропущенных списаний ровно тогда, когда они нужнее всего.
+        Без живых записей проход стоит один дешёвый SELECT; неконфигурированный
+        Platega отсекается ниже по is_configured.
+        """
+        try:
+            from app.database.crud import platega_subscription as sub_crud
+            from app.services.platega_recurrent import platega_reconcile_decision
+            from app.services.platega_service import PlategaService
+
+            service = PlategaService()
+            if not service.is_configured:
+                return
+
+            records = await sub_crud.list_platega_subscriptions_by_statuses(db, ['PENDING', 'ACTIVE', 'PAST_DUE'])
+
+            for record in records:
+                try:
+                    if record.platega_subscription_id:
+                        remote, http_status = await service.get_subscription_status(record.platega_subscription_id)
+                        # 404 = провайдер достоверно не знает подписку; None-статус =
+                        # транспортный сбой — зависший PENDING хоронить рано.
+                        remote_missing = http_status == 404
+                    else:
+                        remote, remote_missing = None, True
+                    remote_status = (
+                        str(remote.get('status')).strip().lower()
+                        if remote and remote.get('status') is not None
+                        else None
+                    )
+                    age_minutes = (
+                        (datetime.now(UTC) - record.created_at).total_seconds() / 60
+                        if record.created_at is not None
+                        else 0.0
+                    )
+
+                    new_status = platega_reconcile_decision(
+                        record.status, remote_status, age_minutes, remote_missing=remote_missing
+                    )
+                    if new_status and new_status != record.status:
+                        previous_status = record.status
+                        await sub_crud.update_platega_subscription(db, record, status=new_status)
+                        logger.info(
+                            'Platega-подписка реконсилирована',
+                            local_id=record.id,
+                            platega_subscription_id=record.platega_subscription_id,
+                            old_status=previous_status,
+                            new_status=new_status,
+                            remote_status=remote_status,
+                        )
+
+                    # Потерянный CONFIRMED при живом remote: статус чинится выше,
+                    # а деньги — здесь. Порядок важен: сначала статус-решение
+                    # (remote cancelled → локально CANCELLED), потом replay —
+                    # тогда доначисление по отменённой записи пройдёт через
+                    # was_cancelled-ветку коллбека (продлить, не воскрешая).
+                    if remote is not None:
+                        from app.services.payment.platega import replay_missed_platega_charges
+
+                        await replay_missed_platega_charges(db, record, remote)
+                except Exception as record_error:
+                    logger.warning(
+                        'Не удалось реконсилировать Platega-подписку',
+                        local_id=getattr(record, 'id', None),
+                        error=record_error,
+                    )
+
+            # Контрольный свип недавних отмен: локальный CANCELLED мог не дойти
+            # до Platega (сеть при cancel-запросе) — тогда провайдер продолжит
+            # списывать. Сверяем remote-статус и добиваем отмену повторно.
+            cancelled_records = await sub_crud.list_recently_cancelled_platega_subscriptions(
+                db, datetime.now(UTC) - timedelta(days=30)
+            )
+            for record in cancelled_records:
+                try:
+                    remote = await service.get_subscription(record.platega_subscription_id)
+                    remote_status = (
+                        str(remote.get('status')).strip().lower()
+                        if remote and remote.get('status') is not None
+                        else None
+                    )
+                    if remote_status in (None, 'cancelled', 'canceled', 'failed'):
+                        continue
+                    cancel_result = await service.cancel_subscription(record.platega_subscription_id)
+                    logger.warning(
+                        'Platega-подписка осталась активной после локальной отмены — повторил отмену',
+                        local_id=record.id,
+                        platega_subscription_id=record.platega_subscription_id,
+                        remote_status=remote_status,
+                        cancel_confirmed=cancel_result is not None,
+                    )
+                except Exception as record_error:
+                    logger.warning(
+                        'Не удалось досверить отменённую Platega-подписку',
+                        local_id=getattr(record, 'id', None),
+                        error=record_error,
+                    )
+        except Exception as e:
+            logger.warning('Ошибка реконсиляции Platega-подписок', error=e)
+
+    async def _reconcile_lava_subscriptions(self, db: AsyncSession):
+        """Safety net для рекуррентных подписок Lava — зеркало Platega-реконсиляции.
+
+        Сверяет локальный статус со статусом Lava (потерянные вебхуки, зависший
+        PENDING) и добивает недошедшие отмены. Доначисления пропущенных списаний
+        здесь нет: у Lava нет истории чарджей по подписке (``subscription/status``
+        отдаёт только текущее состояние), поэтому восстановить конкретные
+        invoice_id для идемпотентного продления невозможно — ретраи вебхуков Lava
+        (5 попыток раз в 150с) остаются единственным механизмом доставки.
+
+        НЕ гейтится LAVA_RECURRENT_ENABLED намеренно: выключение фичи не
+        останавливает существующие привязки, а отмены разгейчены на всех
+        поверхностях.
+        """
+        try:
+            from app.database.crud import lava_subscription as sub_crud
+            from app.services.lava_recurrent import lava_reconcile_decision, normalize_remote_status
+            from app.services.lava_service import LavaAPIError, lava_service
+
+            if not settings.is_lava_enabled():
+                return
+
+            def _remote_status(payload: dict | None) -> str | None:
+                data = (payload or {}).get('data') or {}
+                return normalize_remote_status(data.get('status'))
+
+            records = await sub_crud.list_lava_subscriptions_by_statuses(db, ['PENDING', 'ACTIVE', 'PAST_DUE'])
+
+            for record in records:
+                try:
+                    # Нет ни одного идентификатора — провайдер о подписке точно
+                    # не знает (subscribe не дошёл).
+                    remote_missing = True
+                    remote_status = None
+                    if record.lava_subscription_id or record.order_id:
+                        try:
+                            payload = await lava_service.get_recurrent_subscription_status(
+                                subscription_id=record.lava_subscription_id,
+                                order_id=None if record.lava_subscription_id else record.order_id,
+                            )
+                            remote_status = _remote_status(payload)
+                            remote_missing = remote_status is None
+                        except LavaAPIError as api_error:
+                            # 404/422 = провайдер ДОСТОВЕРНО не знает подписку;
+                            # прочие коды и транспортные сбои — временная
+                            # недоступность, зависший PENDING хоронить рано.
+                            # Без этого разделения _post поднимал исключение на
+                            # ЛЮБОЙ 4xx, remote_missing навсегда оставался False,
+                            # и правило «PENDING старше 30 мин → FAILED» было
+                            # недостижимо: запись висела вечно, а partial unique
+                            # не давал пользователю включить автопродление снова.
+                            remote_missing = api_error.status_code in (404, 422)
+                        except Exception:
+                            remote_missing = False
+
+                    age_minutes = (
+                        (datetime.now(UTC) - record.created_at).total_seconds() / 60
+                        if record.created_at is not None
+                        else 0.0
+                    )
+
+                    new_status = lava_reconcile_decision(
+                        record.status, remote_status, age_minutes, remote_missing=remote_missing
+                    )
+                    if new_status and new_status != record.status:
+                        previous_status = record.status
+                        await sub_crud.update_lava_subscription(db, record, status=new_status)
+                        logger.info(
+                            'Lava-подписка реконсилирована',
+                            local_id=record.id,
+                            lava_subscription_id=record.lava_subscription_id,
+                            old_status=previous_status,
+                            new_status=new_status,
+                            remote_status=remote_status,
+                        )
+                except Exception as record_error:
+                    logger.warning(
+                        'Не удалось реконсилировать Lava-подписку',
+                        local_id=getattr(record, 'id', None),
+                        error=record_error,
+                    )
+
+            # Контрольный свип недавних отмен: локальный CANCELLED мог не дойти
+            # до Lava — тогда провайдер продолжит списывать.
+            cancelled_records = await sub_crud.list_recently_cancelled_lava_subscriptions(
+                db, datetime.now(UTC) - timedelta(days=30)
+            )
+            for record in cancelled_records:
+                try:
+                    payload = await lava_service.get_recurrent_subscription_status(
+                        subscription_id=record.lava_subscription_id,
+                    )
+                    remote_status = _remote_status(payload)
+                    if remote_status in (None, 'cancelled', 'failed', 'expired'):
+                        continue
+                    await lava_service.unsubscribe_recurrent(subscription_id=record.lava_subscription_id)
+                    logger.warning(
+                        'Lava-подписка осталась активной после локальной отмены — повторил отмену',
+                        local_id=record.id,
+                        lava_subscription_id=record.lava_subscription_id,
+                        remote_status=remote_status,
+                    )
+                except Exception as record_error:
+                    logger.warning(
+                        'Не удалось досверить отменённую Lava-подписку',
+                        local_id=getattr(record, 'id', None),
+                        error=record_error,
+                    )
+        except Exception as e:
+            logger.warning('Ошибка реконсиляции Lava-подписок', error=e)
+
     async def _check_ticket_sla(self, db: AsyncSession):
         try:
             # Quick guards
@@ -2411,7 +2945,7 @@ class MonitoringService:
 
                 sla_enabled_runtime = SupportSettingsService.get_sla_enabled()
             except Exception:
-                sla_enabled_runtime = getattr(settings, 'SUPPORT_TICKET_SLA_ENABLED', True)
+                sla_enabled_runtime = getattr(settings, 'SUPPORT_TICKET_SLA_ENABLED', False)
             if not sla_enabled_runtime:
                 return
             if not self.bot:
@@ -2424,8 +2958,8 @@ class MonitoringService:
 
                 sla_minutes = max(1, int(SupportSettingsService.get_sla_minutes()))
             except Exception:
-                sla_minutes = max(1, int(getattr(settings, 'SUPPORT_TICKET_SLA_MINUTES', 5)))
-            cooldown_minutes = max(1, int(getattr(settings, 'SUPPORT_TICKET_SLA_REMINDER_COOLDOWN_MINUTES', 15)))
+                sla_minutes = max(1, int(getattr(settings, 'SUPPORT_TICKET_SLA_MINUTES', 60)))
+            cooldown_minutes = max(1, int(getattr(settings, 'SUPPORT_TICKET_SLA_REMINDER_COOLDOWN_MINUTES', 30)))
             now = datetime.now(UTC)
             stale_before = now - timedelta(minutes=sla_minutes)
             cooldown_before = now - timedelta(minutes=cooldown_minutes)
@@ -2500,7 +3034,7 @@ class MonitoringService:
 
     async def _sla_loop(self):
         try:
-            interval_seconds = max(10, int(getattr(settings, 'SUPPORT_TICKET_SLA_CHECK_INTERVAL_SECONDS', 60)))
+            interval_seconds = max(10, int(getattr(settings, 'SUPPORT_TICKET_SLA_CHECK_INTERVAL_SECONDS', 300)))
         except Exception:
             interval_seconds = 60
         while self.is_running:

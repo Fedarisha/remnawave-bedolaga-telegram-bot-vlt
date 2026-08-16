@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import hmac
 from datetime import UTC, datetime
 
 import structlog
@@ -29,6 +30,7 @@ from app.database.crud.user import (
     verify_and_apply_email_change,
 )
 from app.database.models import CabinetRefreshToken, User, UserStatus
+from app.services import legal_consent_service
 from app.services.campaign_service import AdvertisingCampaignService
 from app.services.disposable_email_service import disposable_email_service
 from app.services.rbac_bootstrap_service import (
@@ -43,6 +45,7 @@ from app.services.web_auth_service import (
     poll_web_auth_token,
 )
 from app.utils.cache import RateLimitCache, TokenReplayCache
+from app.utils.subscription_utils import coerce_panel_device_limit
 from app.utils.timezone import panel_datetime_to_utc
 
 from ..auth import (
@@ -65,7 +68,12 @@ from ..auth.email_verification import (
     is_token_expired,
 )
 from ..auth.jwt_handler import get_refresh_token_expires_at
-from ..auth.merge_service import create_merge_token
+from ..auth.merge_service import (
+    clear_email_merge_otp,
+    create_merge_token,
+    get_email_merge_otp,
+    store_email_merge_otp,
+)
 from ..dependencies import get_cabinet_db, get_current_cabinet_user
 from ..ip_utils import get_client_ip
 from ..schemas.auth import (
@@ -78,6 +86,7 @@ from ..schemas.auth import (
     EmailChangeResponse,
     EmailChangeVerifyRequest,
     EmailLoginRequest,
+    EmailMergeVerifyRequest,
     EmailRegisterRequest,
     EmailRegisterStandaloneRequest,
     EmailVerifyRequest,
@@ -190,6 +199,39 @@ async def _store_refresh_token(
     )
     await db.execute(stmt)
     await db.commit()
+
+
+async def _require_legal_consent(
+    db: AsyncSession,
+    *,
+    accepted: list[str] | None,
+    language: str,
+) -> list[str]:
+    """Проверить галочки «ознакомлен» ПЕРЕД созданием нового аккаунта.
+
+    Возвращает документы, согласие с которыми надо записать после создания юзера.
+    Если согласия не хватает — 428 со списком документов: экран логина по нему
+    рисует чекбоксы и повторяет запрос. Пустой список = гейт выключен или показывать
+    нечего, тогда регистрация идёт как раньше.
+    """
+    requirement = await legal_consent_service.get_requirement(db, language)
+    if not requirement.required:
+        return []
+
+    missing = legal_consent_service.missing_documents(requirement.documents, accepted)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail={
+                'code': 'legal_consent_required',
+                'message': 'Consent to the legal documents is required to create an account',
+                'documents': requirement.documents,
+                'missing': missing,
+                'prechecked': requirement.prechecked,
+            },
+        )
+
+    return requirement.documents
 
 
 async def _process_campaign_bonus(
@@ -376,8 +418,9 @@ async def _sync_subscription_from_panel_by_email(db: AsyncSession, user: User) -
             return
 
         async with service.get_api_client() as api:
-            # Try to find user by email in panel
-            panel_users = await api.get_user_by_email(user.email)
+            # Try to find user by email in panel.
+            # 3.0.0 удалил GET /api/users/by-email — поиск живёт фильтром стрима.
+            panel_users = await api.find_users_by_email(user.email)
 
             if not panel_users:
                 logger.debug('No subscription found in panel for email', email=user.email)
@@ -391,48 +434,48 @@ async def _sync_subscription_from_panel_by_email(db: AsyncSession, user: User) -
             panel_users_to_sync = panel_users if settings.is_multi_tariff_enabled() else panel_users[:1]
 
             for panel_user in panel_users_to_sync:
-                logger.info('Syncing panel subscription for email', email=user.email, uuid=panel_user.uuid)
+                logger.info('Syncing panel subscription for email', email=user.email, panel_user_id=panel_user.id)
 
-                # Check if another user already owns this remnawave_uuid
+                # Check if another user already owns this remnawave_id
                 if settings.is_multi_tariff_enabled():
                     from sqlalchemy import select as _select
 
                     from app.database.models import Subscription as _Subscription
 
                     _sub_result = await db.execute(
-                        _select(_Subscription).where(_Subscription.remnawave_uuid == panel_user.uuid)
+                        _select(_Subscription).where(_Subscription.remnawave_id == panel_user.id)
                     )
                     _existing_sub = _sub_result.scalar_one_or_none()
                     if _existing_sub and _existing_sub.user_id != user.id:
                         logger.warning(
-                            'Panel UUID already owned by another user subscription, skipping',
+                            'Panel user already owned by another user subscription, skipping',
                             email=user.email,
-                            panel_uuid=panel_user.uuid,
+                            panel_user_id=panel_user.id,
                             existing_owner_id=_existing_sub.user_id,
                         )
                         continue
                 else:
-                    from app.database.crud.user import get_user_by_remnawave_uuid
+                    from app.database.crud.user import get_user_by_remnawave_id
 
-                    existing_owner = await get_user_by_remnawave_uuid(db, panel_user.uuid)
+                    existing_owner = await get_user_by_remnawave_id(db, panel_user.id)
                     if existing_owner and existing_owner.id != user.id:
                         logger.warning(
-                            'Panel UUID already belongs to another user, skipping',
+                            'Panel user already belongs to another user, skipping',
                             email=user.email,
-                            panel_uuid=panel_user.uuid,
+                            panel_user_id=panel_user.id,
                             existing_owner_id=existing_owner.id,
                         )
                         continue
 
                 # Link user to panel (only in single-tariff mode)
                 if not settings.is_multi_tariff_enabled():
-                    user.remnawave_uuid = panel_user.uuid
+                    user.remnawave_id = panel_user.id
 
                 # Find existing subscription
                 if settings.is_multi_tariff_enabled():
                     active_subs = await get_active_subscriptions_by_user_id(db, user.id)
                     existing_sub = next(
-                        (s for s in active_subs if s.remnawave_uuid == panel_user.uuid),
+                        (s for s in active_subs if s.remnawave_id == panel_user.id),
                         None,
                     )
                 else:
@@ -447,7 +490,7 @@ async def _sync_subscription_from_panel_by_email(db: AsyncSession, user: User) -
                 connected_squads = [
                     s.get('uuid', '') for s in (panel_user.active_internal_squads or []) if s.get('uuid')
                 ]
-                device_limit = panel_user.hwid_device_limit or 0
+                device_limit = coerce_panel_device_limit(panel_user.hwid_device_limit, default=0)
 
                 # Determine status
                 current_time = datetime.now(UTC)
@@ -465,14 +508,18 @@ async def _sync_subscription_from_panel_by_email(db: AsyncSession, user: User) -
                     existing_sub.status = sub_status.value
                     existing_sub.remnawave_short_uuid = panel_user.short_uuid
                     existing_sub.subscription_url = panel_user.subscription_url
-                    existing_sub.subscription_crypto_link = panel_user.happ_crypto_link
+                    # Не затираем рабочую ссылку пустым значением: панель
+                    # отдаёт happ-ссылку не на всех путях, а потеря сохранённой
+                    # ломает кнопку подключения у живого клиента.
+                    if panel_user.happ_crypto_link:
+                        existing_sub.subscription_crypto_link = panel_user.happ_crypto_link
                     existing_sub.connected_squads = connected_squads
                     existing_sub.device_limit = device_limit
                     existing_sub.is_trial = False
                     logger.info(
                         'Updated subscription for email user',
                         email=user.email,
-                        uuid=panel_user.uuid,
+                        panel_user_id=panel_user.id,
                     )
                 else:
                     from app.database.crud.subscription import generate_unique_short_id
@@ -486,7 +533,7 @@ async def _sync_subscription_from_panel_by_email(db: AsyncSession, user: User) -
                         traffic_used_gb=traffic_used_gb,
                         status=sub_status.value,
                         is_trial=False,
-                        remnawave_uuid=panel_user.uuid if settings.is_multi_tariff_enabled() else None,
+                        remnawave_id=panel_user.id if settings.is_multi_tariff_enabled() else None,
                         remnawave_short_id=_short_id,
                         remnawave_short_uuid=panel_user.short_uuid,
                         subscription_url=panel_user.subscription_url,
@@ -498,7 +545,7 @@ async def _sync_subscription_from_panel_by_email(db: AsyncSession, user: User) -
                     logger.info(
                         'Created subscription for email user',
                         email=user.email,
-                        uuid=panel_user.uuid,
+                        panel_user_id=panel_user.id,
                     )
 
             await db.commit()
@@ -591,7 +638,12 @@ async def auth_telegram(
             logger.warning('Failed to check pending referral', error=e)
 
     is_new_user = not user
+    consent_documents: list[str] = []
     if not user:
+        # Согласие проверяем ДО создания: иначе аккаунт уже есть, а галочки нет.
+        consent_documents = await _require_legal_consent(
+            db, accepted=request.accepted_legal_documents, language=tg_language or 'ru'
+        )
         # Create new user from Telegram initData
         logger.info('Creating new user from cabinet (initData): telegram_id', telegram_id=telegram_id)
         user = await create_user(
@@ -604,6 +656,9 @@ async def auth_telegram(
             referred_by_id=referrer_id,
         )
         logger.info('User created successfully: id=, telegram_id', user_id=user.id, telegram_id=user.telegram_id)
+        await legal_consent_service.record_consent(
+            db, user, consent_documents, source='cabinet_telegram', ip_address=client_ip
+        )
     else:
         # Update user info from initData (like bot middleware does)
         updated = False
@@ -720,11 +775,20 @@ async def auth_telegram_widget(
 
     widget_data = request.model_dump(exclude={'campaign_slug', 'referral_code'})
 
-    # Generous max_age: Telegram caches auth data with stale auth_date
-    if not validate_telegram_login_widget(widget_data, max_age_seconds=86400 * 30):
+    # Login Widget auth is fresh per click (24h is already very generous).
+    if not validate_telegram_login_widget(widget_data, max_age_seconds=86400):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail='Invalid or expired Telegram authentication data',
+        )
+    # SECURITY: one-time use. A widget payload can travel in the redirect URL
+    # (browser history / referrer / access logs); without a replay guard a
+    # captured payload would be a reusable login credential for the whole window.
+    widget_replay = hashlib.sha256(f'tg_widget:{widget_data.get("hash", "")}'.encode()).hexdigest()
+    if await TokenReplayCache.is_token_replayed(widget_replay, ttl=86400):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='This Telegram authorization has already been used. Please log in again.',
         )
 
     user = await get_user_by_telegram_id(db, request.id)
@@ -769,7 +833,9 @@ async def auth_telegram_widget(
                 logger.warning('Failed to check pending referral (widget)', error=e)
 
     is_new_user = not user
+    consent_documents: list[str] = []
     if not user:
+        consent_documents = await _require_legal_consent(db, accepted=request.accepted_legal_documents, language='ru')
         # Create new user from Telegram data
         logger.info(
             'Creating new user from cabinet: telegram_id=, username', request_id=request.id, username=request.username
@@ -784,6 +850,9 @@ async def auth_telegram_widget(
             referred_by_id=referrer_id,
         )
         logger.info('User created successfully: id=, telegram_id', user_id=user.id, telegram_id=user.telegram_id)
+        await legal_consent_service.record_consent(
+            db, user, consent_documents, source='cabinet_telegram_widget', ip_address=client_ip
+        )
 
     if user.status != UserStatus.ACTIVE.value:
         raise HTTPException(
@@ -954,7 +1023,11 @@ async def auth_telegram_oidc(
                 logger.warning('Failed to check pending referral (oidc)', error=e)
 
     is_new_user = not user
+    consent_documents: list[str] = []
     if not user:
+        consent_documents = await _require_legal_consent(
+            db, accepted=request.accepted_legal_documents, language=language or 'ru'
+        )
         logger.info('Creating new user from cabinet OIDC', telegram_id=telegram_id, username=username)
         user = await create_user(
             db=db,
@@ -966,6 +1039,9 @@ async def auth_telegram_oidc(
             referred_by_id=referrer_id,
         )
         logger.info('User created successfully', user_id=user.id, telegram_id=user.telegram_id)
+        await legal_consent_service.record_consent(
+            db, user, consent_documents, source='cabinet_telegram_oidc', ip_address=client_ip
+        )
 
     if user.status != UserStatus.ACTIVE.value:
         raise HTTPException(
@@ -1058,8 +1134,18 @@ async def register_email(
             detail='Disposable email addresses are not allowed',
         )
 
-    # Check if email already exists (case-insensitive, exclude deleted users)
+    # SECURITY: never let registration/linking bind an ADMIN_EMAILS address. Admin
+    # authority is keyed off email_verified alone (config.is_admin / get_current_admin_user),
+    # so with email verification disabled this would be a no-proof superadmin grant.
+    # Mirrors the /email/change guard.
     email_lower = (request.email or '').strip().lower()
+    if email_lower and email_lower in {e.lower() for e in settings.get_admin_emails()}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='This email address cannot be linked to your account.',
+        )
+
+    # Check if email already exists (case-insensitive, exclude deleted users)
     existing_result = await db.execute(
         select(User).where(
             func.lower(User.email) == email_lower,
@@ -1073,22 +1159,57 @@ async def register_email(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail='This email is already linked to your account',
             )
-        # Offer account merge instead of blocking
+        # SECURITY — account-takeover prevention. Merging absorbs the existing
+        # account (its subscription, balance, email) into the caller's account
+        # and issues a session for the result. The OAuth and Telegram link flows
+        # only mint a merge token AFTER the caller has PROVEN control of the other
+        # identity (completing the provider auth / validating signed init data).
+        # The email flow has no such proof, so we require control of the existing
+        # account's INBOX: mail a one-time code to it; the caller confirms it via
+        # /email/merge/verify, and only then is a merge token minted. Without
+        # this, anyone who merely knows a victim's email could take over their
+        # account. Works for password-less (OAuth-only) accounts too.
+        if not email_service.is_configured():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail='Email service is not configured; cannot verify the existing account',
+            )
+        merge_code = generate_email_change_code()
+        await store_email_merge_otp(user.id, existing_email_user.id, email_lower, merge_code)
+        lang = user.language or 'ru'
+        expire_minutes = settings.get_cabinet_email_change_code_expire_minutes()
+        override = await get_rendered_override(
+            'email_change_code',
+            lang,
+            context={
+                'username': user.first_name or '',
+                'email': email_lower,
+                'code': merge_code,
+                'expire_minutes': str(expire_minutes),
+            },
+            db=db,
+            required_vars=['code'],
+        )
+        custom_subject, custom_body = override or (None, None)
+        await asyncio.to_thread(
+            email_service.send_email_change_code,
+            to_email=email_lower,
+            code=merge_code,
+            username=user.first_name,
+            language=lang,
+            custom_subject=custom_subject,
+            custom_body_html=custom_body,
+        )
         logger.info(
-            'Email register conflict: email already linked to another user, offering merge',
+            'Email register conflict: merge confirmation code sent to existing account',
             current_user_id=user.id,
             existing_user_id=existing_email_user.id,
         )
-        merge_token = await create_merge_token(
-            primary_user_id=user.id,
-            secondary_user_id=existing_email_user.id,
-            provider='email',
-            provider_id=email_lower,
-        )
         return {
-            'message': 'Account merge required',
+            'message': 'A confirmation code was sent to that email address.',
             'merge_required': True,
-            'merge_token': merge_token,
+            'merge_verification': 'email_code',
+            'merge_token': None,
         }
 
     # Update user
@@ -1124,10 +1245,12 @@ async def register_email(
                 lang,
                 context={
                     'username': user.first_name or '',
+                    'email': request.email,
                     'verification_url': full_url,
                     'expire_hours': str(expire_hours),
                 },
                 db=db,
+                required_vars=['verification_url'],
             )
             custom_subject, custom_body = override or (None, None)
 
@@ -1147,6 +1270,81 @@ async def register_email(
         if not settings.is_cabinet_email_verification_enabled()
         else 'Verification email sent',
         'email': request.email,
+    }
+
+
+@router.post('/email/merge/verify')
+async def verify_email_merge(
+    request: EmailMergeVerifyRequest,
+    raw_request: Request,
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """
+    Confirm an email account merge with the code mailed to the existing account.
+
+    Proves the caller controls that account's inbox, then mints the merge token
+    (consumed at POST /cabinet/auth/merge/{token}).
+    """
+    # Rate-limit like the other OTP-verify endpoints (IP + per-account); on the
+    # per-account cap, burn the pending merge so a brute force can't grind the
+    # live code — the caller must restart (re-emailing the existing owner).
+    client_ip = get_client_ip(raw_request)
+    if await RateLimitCache.is_ip_rate_limited(client_ip, 'email_merge_verify', limit=5, window=60, fail_closed=True):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail='Too many requests',
+            headers={'Retry-After': '60'},
+        )
+    if await RateLimitCache.is_ip_rate_limited(
+        f'user:{user.id}', 'email_merge_verify', limit=5, window=900, fail_closed=True
+    ):
+        await clear_email_merge_otp(user.id)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail='Too many invalid attempts. Please start the merge again.',
+        )
+
+    pending = await get_email_merge_otp(user.id)
+    if not pending:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='No pending account merge. Please start again.',
+        )
+    if not hmac.compare_digest(str(pending.get('code', '')), str(request.code)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Invalid confirmation code',
+        )
+
+    # Re-validate the target still exists and still owns that email (it could have
+    # been merged/deleted/changed in the meantime).
+    secondary_user_id = int(pending['secondary_user_id'])
+    pending_email = str(pending.get('email', ''))
+    secondary = await get_user_by_id(db, secondary_user_id)
+    if not secondary or secondary.id == user.id or (secondary.email or '').strip().lower() != pending_email:
+        await clear_email_merge_otp(user.id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='That account is no longer available to merge.',
+        )
+
+    await clear_email_merge_otp(user.id)
+    merge_token = await create_merge_token(
+        primary_user_id=user.id,
+        secondary_user_id=secondary_user_id,
+        provider='email',
+        provider_id=pending_email,
+    )
+    logger.info(
+        'Email merge confirmed via code, token issued',
+        current_user_id=user.id,
+        existing_user_id=secondary_user_id,
+    )
+    return {
+        'message': 'Account merge confirmed',
+        'merge_required': True,
+        'merge_token': merge_token,
     }
 
 
@@ -1192,8 +1390,18 @@ async def register_email_standalone(
             detail='Disposable email addresses are not allowed',
         )
 
-    # Проверить что email не занят (без учёта регистра)
+    # SECURITY: never let standalone registration claim an ADMIN_EMAILS address. With
+    # email verification disabled this flow sets email_verified=True with no inbox proof,
+    # and admin authority is keyed off email_verified — so an unverified ADMIN_EMAILS
+    # registration would grant superadmin on first login. Mirrors the /email/change guard.
     email_lower = (request.email or '').strip().lower()
+    if email_lower and email_lower in {e.lower() for e in settings.get_admin_emails()}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='This email address cannot be used for registration.',
+        )
+
+    # Проверить что email не занят (без учёта регистра)
     existing = await db.execute(select(User).where(func.lower(User.email) == email_lower))
     if existing.scalar_one_or_none():
         raise HTTPException(
@@ -1224,6 +1432,11 @@ async def register_email_standalone(
                     referral_code=request.referral_code,
                 )
 
+    # Согласие проверяем ДО создания: иначе аккаунт уже есть, а галочки нет.
+    consent_documents = await _require_legal_consent(
+        db, accepted=request.accepted_legal_documents, language=request.language or 'ru'
+    )
+
     # Создать пользователя
     user = await create_user_by_email(
         db=db,
@@ -1232,6 +1445,9 @@ async def register_email_standalone(
         first_name=request.first_name,
         language=request.language,
         referred_by_id=referrer.id if referrer else None,
+    )
+    await legal_consent_service.record_consent(
+        db, user, consent_documents, source='cabinet_email', ip_address=client_ip
     )
 
     # Сохранить campaign_slug для обработки при верификации email
@@ -1276,10 +1492,12 @@ async def register_email_standalone(
                 lang,
                 context={
                     'username': user.first_name or 'User',
+                    'email': request.email,
                     'verification_url': full_url,
                     'expire_hours': str(expire_hours),
                 },
                 db=db,
+                required_vars=['verification_url'],
             )
             custom_subject, custom_body = override or (None, None)
 
@@ -1418,10 +1636,12 @@ async def resend_verification(
             lang,
             context={
                 'username': user.first_name or '',
+                'email': user.email,
                 'verification_url': full_url,
                 'expire_hours': str(expire_hours),
             },
             db=db,
+            required_vars=['verification_url'],
         )
         custom_subject, custom_body = override or (None, None)
 
@@ -1759,8 +1979,14 @@ async def forgot_password(
         override = await get_rendered_override(
             'password_reset',
             lang,
-            context={'username': user.first_name or '', 'reset_url': full_url, 'expire_hours': str(expire_hours)},
+            context={
+                'username': user.first_name or '',
+                'email': user.email,
+                'reset_url': full_url,
+                'expire_hours': str(expire_hours),
+            },
             db=db,
+            required_vars=['reset_url'],
         )
         custom_subject, custom_body = override or (None, None)
 
@@ -1857,6 +2083,7 @@ async def check_is_admin(
 @router.post('/email/change', response_model=EmailChangeResponse)
 async def request_email_change(
     request: EmailChangeRequest,
+    raw_request: Request,
     user: User = Depends(get_current_cabinet_user),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
@@ -1866,6 +2093,20 @@ async def request_email_change(
     For verified emails: sends a 6-digit verification code to the new email.
     For unverified emails: replaces the email directly and sends verification to the new address.
     """
+    # Rate-limit: each request mails an OTP to an arbitrary address, so throttle
+    # by IP and by account to prevent code-flooding and brute-force restarts.
+    client_ip = get_client_ip(raw_request)
+    if await RateLimitCache.is_ip_rate_limited(
+        client_ip, 'email_change_request', limit=5, window=300, fail_closed=True
+    ) or await RateLimitCache.is_ip_rate_limited(
+        f'user:{user.id}', 'email_change_request', limit=5, window=3600, fail_closed=True
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail='Too many requests',
+            headers={'Retry-After': '300'},
+        )
+
     if not user.email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1877,6 +2118,16 @@ async def request_email_change(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail='New email is the same as current email',
+        )
+
+    # SECURITY: never let the change flow bind an ADMIN_EMAILS address the user
+    # does not already own. Verifying it sets email_verification_source='cabinet'
+    # (a trusted source) and would auto-grant superadmin on next login.
+    new_email_lower = request.new_email.strip().lower()
+    if new_email_lower in settings.get_admin_emails() and user.email.lower() != new_email_lower:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='This email address cannot be linked to your account.',
         )
 
     # Check for disposable email
@@ -1925,10 +2176,12 @@ async def request_email_change(
                 lang,
                 context={
                     'username': user.first_name or '',
+                    'email': request.new_email,
                     'verification_url': full_url,
                     'expire_hours': str(expire_hours),
                 },
                 db=db,
+                required_vars=['verification_url'],
             )
             custom_subject, custom_body = override or (None, None)
 
@@ -1980,10 +2233,12 @@ async def request_email_change(
             lang,
             context={
                 'username': user.first_name or '',
+                'email': request.new_email,
                 'code': code,
                 'expire_minutes': str(expire_minutes),
             },
             db=db,
+            required_vars=['code'],
         )
         custom_subject, custom_body = override or (None, None)
 
@@ -2016,6 +2271,7 @@ async def request_email_change(
 @router.post('/email/change/verify')
 async def verify_email_change(
     request: EmailChangeVerifyRequest,
+    raw_request: Request,
     user: User = Depends(get_current_cabinet_user),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
@@ -2024,6 +2280,27 @@ async def verify_email_change(
 
     Completes the email change process if the code is valid.
     """
+    # SECURITY: the change code is a 6-digit OTP mailed to the NEW address (the
+    # attacker never sees it). Without a hard cap it is brute-forceable within
+    # its TTL. Rate-limit by IP AND by account; once the per-account cap is hit,
+    # burn the pending change so the attacker must restart (re-emailing the
+    # victim, who would notice) instead of grinding the same live code.
+    client_ip = get_client_ip(raw_request)
+    if await RateLimitCache.is_ip_rate_limited(client_ip, 'email_change_verify', limit=5, window=60, fail_closed=True):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail='Too many requests',
+            headers={'Retry-After': '60'},
+        )
+    if await RateLimitCache.is_ip_rate_limited(
+        f'user:{user.id}', 'email_change_verify', limit=5, window=900, fail_closed=True
+    ):
+        await clear_email_change_pending(db, user)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail='Too many invalid attempts. Please request a new code.',
+        )
+
     success, message = await verify_and_apply_email_change(db, user, request.code)
 
     if not success:

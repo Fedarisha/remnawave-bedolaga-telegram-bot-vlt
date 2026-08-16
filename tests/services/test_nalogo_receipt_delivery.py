@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -34,7 +35,10 @@ async def test_deliver_nalogo_receipt_sends_email_and_telegram(monkeypatch: pyte
         )
         return True
 
-    import app.cabinet.services.email_service as email_service_module
+    # app.cabinet.services.__init__ реэкспортирует сам инстанс, из-за чего и
+    # `import ... as module`, и строковый target monkeypatch отдают EmailService,
+    # а не модуль. Берём модуль из sys.modules — доставка резолвит его так же.
+    email_service_module = importlib.import_module('app.cabinet.services.email_service')
 
     monkeypatch.setattr(
         email_service_module,
@@ -94,7 +98,10 @@ async def test_deliver_nalogo_receipt_is_deduplicated(monkeypatch: pytest.Monkey
         cache_state[key] = value
         return True
 
-    import app.cabinet.services.email_service as email_service_module
+    # app.cabinet.services.__init__ реэкспортирует сам инстанс, из-за чего и
+    # `import ... as module`, и строковый target monkeypatch отдают EmailService,
+    # а не модуль. Берём модуль из sys.modules — доставка резолвит его так же.
+    email_service_module = importlib.import_module('app.cabinet.services.email_service')
 
     monkeypatch.setattr(
         email_service_module,

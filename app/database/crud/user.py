@@ -1,3 +1,4 @@
+import hmac
 import secrets
 import string
 from datetime import UTC, datetime, timedelta
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
+from app.database.constants import POSTGRES_INT4_MAX, POSTGRES_INT4_MIN
 from app.database.crud.discount_offer import get_latest_claimed_offer_for_user
 from app.database.crud.promo_group import get_default_promo_group
 from app.database.crud.promo_offer_log import log_promo_offer_action
@@ -26,10 +28,42 @@ from app.database.models import (
     UserPromoGroup,
     UserStatus,
 )
+from app.utils.text_search import contains_conditions
 from app.utils.validators import sanitize_telegram_name
 
 
 logger = structlog.get_logger(__name__)
+
+# PostgreSQL BIGINT upper bound. A numeric search term larger than this fits a
+# Python int but overflows the telegram_id BigInteger column, so comparing against
+# it raises a DB error instead of returning no rows.
+_BIGINT_MAX = 9223372036854775807
+
+
+def _user_search_conditions(search: str) -> list:
+    """Build the OR-conditions for the admin user search box (id/name/username).
+
+    Always matches the text columns; matches telegram_id only when the term is an
+    in-range BIGINT number. A digit string that overflows BIGINT (or a non-ASCII
+    "digit" that int() rejects) would otherwise crash the query, so it falls back
+    to text-only matching instead.
+
+    Регистр сворачивается через contains_conditions, а не голым ILIKE: под локалью
+    базы `C` (наш docker-compose) ILIKE не трогает кириллицу, и «поз» не находил
+    «Позитив». Подробности — в app/utils/text_search.py.
+    """
+    conditions = contains_conditions(
+        (User.first_name, User.last_name, User.username),
+        search,
+    )
+    if search.isdigit():
+        try:
+            search_int = int(search)
+        except ValueError:
+            search_int = None
+        if search_int is not None and 0 <= search_int <= _BIGINT_MAX:
+            conditions.append(User.telegram_id == search_int)
+    return conditions
 
 
 def _normalize_language_code(language: str | None, fallback: str = 'ru') -> str:
@@ -87,6 +121,10 @@ def generate_referral_code() -> str:
 
 
 async def get_user_by_id(db: AsyncSession, user_id: int) -> User | None:
+    # users.id is INTEGER (int4) in PostgreSQL; guard large telegram IDs passed by mistake.
+    if user_id < POSTGRES_INT4_MIN or user_id > POSTGRES_INT4_MAX:
+        return None
+
     result = await db.execute(
         select(User)
         .options(
@@ -196,7 +234,20 @@ async def get_user_by_referral_code(db: AsyncSession, referral_code: str) -> Use
     return user
 
 
-async def get_user_by_remnawave_uuid(db: AsyncSession, remnawave_uuid: str) -> User | None:
+async def get_user_by_remnawave_id(db: AsyncSession, remnawave_id: int) -> User | None:
+    """Найти бот-пользователя по числовому id пользователя панели.
+
+    Remnawave 3.0.0 удалил `uuid` из UsersSchema, поэтому идентичность панели —
+    это `id`. Форма поиска прежняя: сначала колонка на User, затем (в
+    multi-tariff) — по подписке, где панельная идентичность и живёт.
+    """
+    if remnawave_id is None:
+        return None
+    try:
+        panel_user_id = int(remnawave_id)
+    except (TypeError, ValueError):
+        return None
+
     result = await db.execute(
         select(User)
         .options(
@@ -204,11 +255,11 @@ async def get_user_by_remnawave_uuid(db: AsyncSession, remnawave_uuid: str) -> U
             selectinload(User.promo_group),
             selectinload(User.referrer),
         )
-        .where(User.remnawave_uuid == remnawave_uuid)
+        .where(User.remnawave_id == panel_user_id)
     )
     user = result.scalar_one_or_none()
 
-    # Multi-tariff: UUID lives on Subscription, not User
+    # Multi-tariff: панельная идентичность лежит на Subscription, не на User
     if not user and settings.is_multi_tariff_enabled():
         from app.database.models import Subscription as _Subscription
 
@@ -217,7 +268,7 @@ async def get_user_by_remnawave_uuid(db: AsyncSession, remnawave_uuid: str) -> U
             .options(
                 selectinload(_Subscription.user).selectinload(User.subscriptions).selectinload(_Subscription.tariff)
             )
-            .where(_Subscription.remnawave_uuid == remnawave_uuid)
+            .where(_Subscription.remnawave_id == panel_user_id)
         )
         sub = sub_result.scalar_one_or_none()
         if sub and sub.user:
@@ -321,6 +372,21 @@ async def create_user_no_commit(
     return user
 
 
+def _violated_constraint(exc: IntegrityError) -> str:
+    """Return the violated DB constraint name for an IntegrityError.
+
+    Prefers asyncpg's programmatic ``constraint_name`` (robust against driver
+    message changes) and falls back to the stringified original error.
+    """
+    orig = getattr(exc, 'orig', None)
+    # SQLAlchemy wraps the dbapi error; the real asyncpg exception is its cause.
+    cause = getattr(orig, '__cause__', None)
+    constraint = getattr(cause, 'constraint_name', None) or getattr(orig, 'constraint_name', None)
+    if constraint:
+        return str(constraint)
+    return str(orig if orig is not None else exc)
+
+
 async def create_user(
     db: AsyncSession,
     telegram_id: int,
@@ -410,11 +476,28 @@ async def create_user(
         except IntegrityError as exc:
             await db.rollback()
 
-            if (
-                isinstance(getattr(exc, 'orig', None), Exception)
-                and 'users_pkey' in str(exc.orig)
-                and attempt < attempts
-            ):
+            constraint = _violated_constraint(exc)
+
+            # Гонка регистраций: параллельный поток уже создал пользователя
+            # с таким telegram_id. Возвращаем существующего вместо падения.
+            if 'telegram_id' in constraint:
+                logger.info(
+                    'Пользователь с таким telegram_id уже существует (гонка регистраций), '
+                    'возвращаем существующего пользователя',
+                    telegram_id=telegram_id,
+                    constraint=constraint,
+                )
+                existing_user = await get_user_by_telegram_id(db, telegram_id)
+                if existing_user:
+                    return existing_user
+
+                # Маловероятно: конфликт был, но пользователь не найден — пробуем ещё раз
+                if attempt < attempts:
+                    continue
+
+                raise
+
+            if 'users_pkey' in constraint and attempt < attempts:
                 logger.warning(
                     '⚠️ Обнаружено несоответствие последовательности users_id_seq при создании пользователя . Выполняем повторную синхронизацию (попытка /)',
                     telegram_id=telegram_id,
@@ -761,7 +844,7 @@ async def subtract_user_balance(
                         log_error=log_error,
                     )
 
-        logger.info('✅ Средства списаны: →', old_balance=old_balance, balance_kopeks=user.balance_kopeks)
+        logger.info('✅ Средства списаны', old_balance=old_balance, balance_kopeks=user.balance_kopeks)
         return True
 
     except Exception as e:
@@ -938,24 +1021,7 @@ async def get_users_list(
         )
 
     if search:
-        search_term = f'%{search}%'
-        conditions = [
-            User.first_name.ilike(search_term),
-            User.last_name.ilike(search_term),
-            User.username.ilike(search_term),
-        ]
-
-        if search.isdigit():
-            try:
-                search_int = int(search)
-                # Добавляем условие поиска по telegram_id, который является BigInteger
-                # и может содержать большие значения, в отличие от User.id (INTEGER)
-                conditions.append(User.telegram_id == search_int)
-            except ValueError:
-                # Если не удалось преобразовать в int, просто ищем по текстовым полям
-                pass
-
-        query = query.where(or_(*conditions))
+        query = query.where(or_(*_user_search_conditions(search)))
 
     if email:
         query = query.where(User.email.ilike(f'%{email}%'))
@@ -1083,24 +1149,7 @@ async def get_users_count(
         )
 
     if search:
-        search_term = f'%{search}%'
-        conditions = [
-            User.first_name.ilike(search_term),
-            User.last_name.ilike(search_term),
-            User.username.ilike(search_term),
-        ]
-
-        if search.isdigit():
-            try:
-                search_int = int(search)
-                # Добавляем условие поиска по telegram_id, который является BigInteger
-                # и может содержать большие значения, в отличие от User.id (INTEGER)
-                conditions.append(User.telegram_id == search_int)
-            except ValueError:
-                # Если не удалось преобразовать в int, просто ищем по текстовым полям
-                pass
-
-        query = query.where(or_(*conditions))
+        query = query.where(or_(*_user_search_conditions(search)))
 
     if email:
         query = query.where(User.email.ilike(f'%{email}%'))
@@ -1316,7 +1365,7 @@ async def get_users_with_active_subscriptions(db: AsyncSession) -> list[User]:
     Используется для мониторинга трафика.
 
     Returns:
-        Список пользователей с активными подписками и remnawave_uuid
+        Список пользователей с активными подписками и панельной идентичностью
     """
     current_time = datetime.now(UTC)
 
@@ -1325,7 +1374,9 @@ async def get_users_with_active_subscriptions(db: AsyncSession) -> list[User]:
         .join(Subscription, User.id == Subscription.user_id)
         .where(
             and_(
-                User.remnawave_uuid.isnot(None),
+                # Панельная идентичность живёт на User (single-tariff) либо на
+                # Subscription (multi-tariff, где User.remnawave_id не заполняется вовсе).
+                or_(User.remnawave_id.isnot(None), Subscription.remnawave_id.isnot(None)),
                 User.status == UserStatus.ACTIVE.value,
                 Subscription.status == SubscriptionStatus.ACTIVE.value,
                 Subscription.end_date > current_time,
@@ -1496,7 +1547,7 @@ async def verify_and_apply_email_change(db: AsyncSession, user: User, code: str)
         await db.commit()
         return False, 'Verification code has expired'
 
-    if user.email_change_code != code:
+    if not hmac.compare_digest(str(user.email_change_code), str(code)):
         return False, 'Invalid verification code'
 
     # Check if new email is still available
@@ -1607,6 +1658,10 @@ async def create_user_by_oauth(
     referred_by_id: int | None = None,
 ) -> User:
     """Create a new user via OAuth provider."""
+    # Normalize the provider email to lowercase so it matches every other flow
+    # (email registration and the OAuth-link backfill both lowercase) and the
+    # case-insensitive unique-email lookups stay consistent.
+    email = email.strip().lower() if email else None
     referral_code = await create_unique_referral_code(db)
     normalized_language = _normalize_language_code(language)
     default_group = await _get_or_create_default_promo_group(db)
@@ -1646,9 +1701,7 @@ async def create_user_by_oauth(
     await db.refresh(user)
 
     user.promo_group = default_group
-    logger.info(
-        'Created OAuth user via (provider_id=) with id', provider=provider, provider_id=provider_id, user_id=user.id
-    )
+    logger.info('Created OAuth user', provider=provider, provider_id=provider_id, user_id=user.id)
 
     try:
         from app.services.event_emitter import event_emitter

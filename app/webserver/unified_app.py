@@ -119,7 +119,7 @@ def _mount_miniapp_static(app: FastAPI) -> tuple[bool, Path]:
 
     try:
         app.mount('/miniapp/static', StaticFiles(directory=static_path), name='miniapp-static')
-        logger.info('📦 Miniapp static files mounted at /miniapp/static from', static_path=static_path)
+        logger.info('📦 Miniapp static files mounted at /miniapp/static', static_path=static_path)
     except RuntimeError as error:  # pragma: no cover - defensive guard
         logger.warning('Не удалось смонтировать статические файлы миниаппа', error=error)
         return False, static_path
@@ -173,6 +173,14 @@ def create_unified_app(
     app.state.dispatcher = dispatcher
     app.state.payment_service = payment_service
 
+    # Republish global ticket events onto the mobile support socket so live
+    # updates reach the admin apps for ALL origins (Telegram, Web API, cabinet,
+    # mini-app), not just support-socket self-echo.
+    if settings.is_cabinet_enabled():
+        from app.cabinet.routes.support_ws import register_support_ticket_event_bridge
+
+        register_support_ticket_event_bridge()
+
     payments_router = payments.create_payment_router(bot, payment_service)
     if payments_router:
         app.include_router(payments_router)
@@ -187,7 +195,7 @@ def create_unified_app(
         remnawave_router = create_remnawave_webhook_router(bot, remnawave_webhook_service)
         app.include_router(remnawave_router)
         app.state.remnawave_webhook_service = remnawave_webhook_service
-        logger.info('RemnaWave webhook router mounted at', REMNAWAVE_WEBHOOK_PATH=settings.REMNAWAVE_WEBHOOK_PATH)
+        logger.info('RemnaWave webhook router mounted', REMNAWAVE_WEBHOOK_PATH=settings.REMNAWAVE_WEBHOOK_PATH)
 
         # ВАЖНО: drain должен выполниться ПЕРЕД остановкой telegram-процессора
         # и disposable-email сервиса (последние могут закрыть aiogram session,

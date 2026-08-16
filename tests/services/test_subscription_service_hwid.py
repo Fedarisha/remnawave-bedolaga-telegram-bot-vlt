@@ -12,6 +12,7 @@ from app.services.subscription_service import SubscriptionService
 
 def _panel_user(uuid: str = 'panel-uuid') -> SimpleNamespace:
     return SimpleNamespace(
+        id=101,
         uuid=uuid,
         short_uuid='short',
         subscription_url='https://sub.example/short',
@@ -28,6 +29,8 @@ def _user() -> SimpleNamespace:
         username=None,
         telegram_id=837601435,
         email='Sas-01-72@yandex.ru',
+        status='active',
+        remnawave_id=101,
         remnawave_uuid='panel-uuid',
     )
 
@@ -35,7 +38,9 @@ def _user() -> SimpleNamespace:
 def _subscription() -> SimpleNamespace:
     return SimpleNamespace(
         id=297,
+        remnawave_id=101,
         remnawave_uuid='panel-uuid',
+        actual_status='active',
         end_date=datetime(2026, 7, 11, tzinfo=UTC),
         traffic_limit_gb=100,
         tariff=None,
@@ -49,6 +54,7 @@ async def test_multi_create_or_update_existing_user_preserves_hwid_devices() -> 
     existing = _panel_user()
     api = SimpleNamespace(
         get_user_by_uuid=AsyncMock(return_value=existing),
+        get_user_by_id=AsyncMock(return_value=existing),
         update_user=AsyncMock(return_value=existing),
         reset_user_devices=AsyncMock(),
     )
@@ -75,6 +81,7 @@ async def test_single_create_or_update_existing_user_preserves_hwid_devices() ->
     existing = _panel_user()
     api = SimpleNamespace(
         get_user_by_uuid=AsyncMock(return_value=existing),
+        get_user_by_id=AsyncMock(return_value=existing),
         get_user_by_telegram_id=AsyncMock(return_value=[]),
         get_user_by_email=AsyncMock(return_value=[]),
         update_user=AsyncMock(return_value=existing),

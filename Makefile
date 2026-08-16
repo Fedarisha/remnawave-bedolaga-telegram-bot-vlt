@@ -53,6 +53,14 @@ migrate-upstream: ## Применить только upstream миграции
 migrate-custom: ## Применить только custom миграции
 	uv run alembic -c alembic_custom.ini upgrade head
 
+.PHONY: backfill-remnawave-ids
+backfill-remnawave-ids: ## Сухой прогон бэкфила панельных id (Remnawave 3.0.0)
+	uv run python -m scripts.backfill_remnawave_ids
+
+.PHONY: backfill-remnawave-ids-apply
+backfill-remnawave-ids-apply: ## Применить бэкфил панельных id (Remnawave 3.0.0)
+	uv run python -m scripts.backfill_remnawave_ids --apply
+
 .PHONY: migration
 migration: ## Создать custom миграцию (usage: make migration m="description")
 	uv run alembic -c alembic_custom.ini revision --autogenerate -m "$(m)"

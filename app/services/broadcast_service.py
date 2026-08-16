@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -69,6 +70,12 @@ class BroadcastConfig:
     initiator_name: str | None = None
     custom_buttons: list[dict] | None = None
     category: str = 'system'  # system|news|promo
+    # Явный список telegram_id вместо резолва target'а. Нужен отправкам, где получатели
+    # уже посчитаны вызывающим кодом (промопредложения создают оффер на каждого).
+    recipient_ids: list[int] | None = None
+    # Персональная клавиатура на получателя (у промопредложений в callback_data зашит
+    # id его оффера). Если задана — вытесняет selected_buttons/custom_buttons.
+    keyboard_factory: Callable[[int], InlineKeyboardMarkup | None] | None = None
 
 
 @dataclass
@@ -167,7 +174,10 @@ class BroadcastService:
                 await session.commit()
 
             # _fetch_recipients теперь возвращает list[int] (telegram_id), а не ORM-объекты
-            recipient_ids: list[int] = await self._fetch_recipients(config.target, config.category)
+            if config.recipient_ids is not None:
+                recipient_ids: list[int] = list(config.recipient_ids)
+            else:
+                recipient_ids = await self._fetch_recipients(config.target, config.category)
 
             async with AsyncSessionLocal() as session:
                 broadcast = await session.get(BroadcastHistory, broadcast_id)
@@ -187,10 +197,14 @@ class BroadcastService:
                 await self._mark_finished(broadcast_id, sent_count, failed_count, blocked_count, cancelled=False)
                 return
 
-            keyboard = self._build_keyboard(config.selected_buttons, config.custom_buttons)
+            keyboard = (
+                None
+                if config.keyboard_factory
+                else self._build_keyboard(config.selected_buttons, config.custom_buttons)
+            )
 
             logger.info(
-                'Рассылка : начинаем отправку получателям (batch delay=s)',
+                'Рассылка: начинаем отправку получателям',
                 broadcast_id=broadcast_id,
                 recipient_ids_count=len(recipient_ids),
                 TG_BATCH_SIZE=_TG_BATCH_SIZE,
@@ -303,7 +317,11 @@ class BroadcastService:
                     return 'failed'
 
                 try:
-                    await self._deliver_message(telegram_id, config, keyboard)
+                    await self._deliver_message(
+                        telegram_id,
+                        config,
+                        config.keyboard_factory(telegram_id) if config.keyboard_factory else keyboard,
+                    )
                     return 'sent'
 
                 except TelegramRetryAfter as e:
@@ -544,7 +562,7 @@ class BroadcastService:
             except InterfaceError as exc:
                 attempts += 1
                 logger.warning(
-                    'Проблемы с соединением при обновлении статуса рассылки : . Повтор /2',
+                    'Проблемы с соединением при обновлении статуса рассылки, повтор',
                     broadcast_id=broadcast_id,
                     exc=exc,
                     attempts=attempts,
@@ -617,10 +635,10 @@ async def cleanup_blocked_broadcast_users(blocked_telegram_ids: list[int]) -> No
                 if settings.is_multi_tariff_enabled():
                     await session.refresh(user, ['subscriptions'])
                     for sub in user.subscriptions or []:
-                        if sub.remnawave_uuid:
-                            await subscription_service.disable_remnawave_user(sub.remnawave_uuid)
-                elif user.remnawave_uuid:
-                    await subscription_service.disable_remnawave_user(user.remnawave_uuid)
+                        if sub.remnawave_id:
+                            await subscription_service.disable_remnawave_user(sub.remnawave_id)
+                elif user.remnawave_id:
+                    await subscription_service.disable_remnawave_user(user.remnawave_id)
 
                 logger.info(
                     'Заблокированный пользователь очищен при рассылке',
@@ -900,7 +918,7 @@ class EmailBroadcastService:
                     return success
                 except Exception as exc:
                     logger.error(
-                        'Ошибка отправки email рассылки на', broadcast_id=broadcast_id, email=recipient.email, exc=exc
+                        'Ошибка отправки email рассылки', broadcast_id=broadcast_id, email=recipient.email, exc=exc
                     )
                     return False
 
@@ -1024,7 +1042,7 @@ class EmailBroadcastService:
             except InterfaceError as exc:
                 attempts += 1
                 logger.warning(
-                    'Connection issue updating email broadcast : . Retry /2',
+                    'Connection issue updating email broadcast, retrying',
                     broadcast_id=broadcast_id,
                     exc=exc,
                     attempts=attempts,

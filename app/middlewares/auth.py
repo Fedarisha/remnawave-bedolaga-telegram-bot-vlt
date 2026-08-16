@@ -22,15 +22,17 @@ from app.utils.validators import sanitize_telegram_name
 logger = structlog.get_logger(__name__)
 
 
-async def _refresh_remnawave_description(remnawave_uuid: str, description: str, telegram_id: int) -> None:
+async def _refresh_remnawave_description(remnawave_id: int, description: str, telegram_id: int) -> None:
     try:
         remnawave_service = RemnaWaveService()
         async with remnawave_service.get_api_client() as api:
-            await api.update_user(uuid=remnawave_uuid, description=description)
+            await api.update_user(user_id=remnawave_id, description=description)
         logger.info('✅ [Middleware] Описание пользователя обновлено в RemnaWave', telegram_id=telegram_id)
     except Exception as remnawave_error:
         logger.error(
-            '❌ [Middleware] Ошибка обновления RemnaWave для', telegram_id=telegram_id, remnawave_error=remnawave_error
+            '❌ [Middleware] Ошибка обновления описания пользователя в RemnaWave',
+            telegram_id=telegram_id,
+            remnawave_error=remnawave_error,
         )
 
 
@@ -163,7 +165,7 @@ class AuthMiddleware(BaseMiddleware):
                     old_username = db_user.username
                     db_user.username = user.username
                     logger.info(
-                        '🔄 [Middleware] Username обновлен для',
+                        '🔄 [Middleware] Username пользователя обновлен',
                         user_id=user.id,
                         old_username=old_username,
                         username=db_user.username,
@@ -176,7 +178,7 @@ class AuthMiddleware(BaseMiddleware):
                     old_first_name = db_user.first_name
                     db_user.first_name = safe_first
                     logger.info(
-                        '🔄 [Middleware] Имя обновлено для',
+                        '🔄 [Middleware] Имя пользователя обновлено',
                         user_id=user.id,
                         old_first_name=old_first_name,
                         first_name=db_user.first_name,
@@ -187,7 +189,7 @@ class AuthMiddleware(BaseMiddleware):
                     old_last_name = db_user.last_name
                     db_user.last_name = safe_last
                     logger.info(
-                        '🔄 [Middleware] Фамилия обновлена для',
+                        '🔄 [Middleware] Фамилия пользователя обновлена',
                         user_id=user.id,
                         old_last_name=old_last_name,
                         last_name=db_user.last_name,
@@ -200,13 +202,13 @@ class AuthMiddleware(BaseMiddleware):
                     db_user.updated_at = datetime.now(UTC)
                     logger.info('💾 [Middleware] Профиль пользователя обновлен в middleware', user_id=user.id)
 
-                    if db_user.remnawave_uuid:
+                    if db_user.remnawave_id:
                         description = settings.format_remnawave_user_description(
                             full_name=db_user.full_name, username=db_user.username, telegram_id=db_user.telegram_id
                         )
                         asyncio.create_task(
                             _refresh_remnawave_description(
-                                remnawave_uuid=db_user.remnawave_uuid,
+                                remnawave_id=db_user.remnawave_id,
                                 description=description,
                                 telegram_id=db_user.telegram_id,
                             )
@@ -220,10 +222,10 @@ class AuthMiddleware(BaseMiddleware):
                             telegram_id=db_user.telegram_id,
                         )
                         for sub in getattr(db_user, 'subscriptions', None) or []:
-                            if sub.remnawave_uuid and sub.remnawave_uuid != db_user.remnawave_uuid:
+                            if sub.remnawave_id and sub.remnawave_id != db_user.remnawave_id:
                                 asyncio.create_task(
                                     _refresh_remnawave_description(
-                                        remnawave_uuid=sub.remnawave_uuid,
+                                        remnawave_id=sub.remnawave_id,
                                         description=description,
                                         telegram_id=db_user.telegram_id,
                                     )

@@ -5,12 +5,13 @@
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from aiogram import Bot
 from sqlalchemy import inspect as sa_inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database.crud.subscription import (
@@ -141,7 +142,23 @@ class DailySubscriptionService:
 
         return stats
 
-    async def _process_single_charge(self, db: AsyncSession, subscription: Subscription) -> str:
+    async def _reload_daily_subscription(self, db, subscription_id: int) -> Subscription:
+        """Пере-фетчит суточную подписку с eager-load user+tariff.
+
+        После ``db.commit()`` (expire_on_commit) eager-loaded связи ``user``/``tariff``
+        истекают; последующее обращение ``subscription.user``/``.tariff`` в async-сессии
+        уходит в lazy-load → ``MissingGreenlet``. Пере-фетч с selectinload восстанавливает
+        связи на объекте, чтобы _process_single_charge и его нотификации читали их
+        безопасно (см. ERROR REPORT: MissingGreenlet в process_auto_resume).
+        """
+        result = await db.execute(
+            select(Subscription)
+            .options(selectinload(Subscription.user), selectinload(Subscription.tariff))
+            .where(Subscription.id == subscription_id)
+        )
+        return result.scalar_one()
+
+    async def _process_single_charge(self, db, subscription) -> str:
         """
         Обрабатывает списание для одной подписки.
 
@@ -200,7 +217,7 @@ class DailySubscriptionService:
                         pass
 
             logger.info(
-                'Подписка приостановлена: недостаточно средств (баланс: требуется: )',
+                'Подписка приостановлена: недостаточно средств',
                 subscription_id=subscription.id,
                 balance_kopeks=user.balance_kopeks,
                 daily_price=daily_price,
@@ -264,8 +281,9 @@ class DailySubscriptionService:
                         squads = [s.squad_uuid for s in all_servers if s.squad_uuid]
                     if squads:
                         subscription.connected_squads = squads
+                        _sub_id = subscription.id
                         await db.commit()
-                        await db.refresh(subscription)
+                        subscription = await self._reload_daily_subscription(db, _sub_id)
             except Exception as sq_err:
                 logger.warning('Не удалось восстановить connected_squads', error=sq_err)
 
@@ -275,10 +293,10 @@ class DailySubscriptionService:
 
                 subscription_service = SubscriptionService()
                 _has_panel_user = (
-                    getattr(subscription, 'remnawave_uuid', None)
+                    getattr(subscription, 'remnawave_id', None)
                     if settings.is_multi_tariff_enabled()
-                    else getattr(user, 'remnawave_uuid', None)
-                )
+                    else getattr(user, 'remnawave_id', None)
+                ) is not None
                 if _has_panel_user:
                     await subscription_service.update_remnawave_user(
                         db,
@@ -296,12 +314,12 @@ class DailySubscriptionService:
                     )
                     # POST может игнорировать activeInternalSquads — отправляем PATCH
                     await db.refresh(user)
-                    _sync_uuid = (
-                        getattr(subscription, 'remnawave_uuid', None)
+                    _sync_panel_user_id = (
+                        getattr(subscription, 'remnawave_id', None)
                         if settings.is_multi_tariff_enabled()
-                        else getattr(user, 'remnawave_uuid', None)
+                        else getattr(user, 'remnawave_id', None)
                     )
-                    if _sync_uuid and subscription.connected_squads:
+                    if _sync_panel_user_id is not None and subscription.connected_squads:
                         try:
                             await subscription_service.update_remnawave_user(
                                 db,
@@ -486,8 +504,11 @@ class DailySubscriptionService:
         """Сбрасывает истекшие докупки трафика у подписки."""
         from app.database.models import TrafficPurchase
 
-        # Получаем подписку
-        subscription_query = select(Subscription).where(Subscription.id == subscription_id)
+        # Получаем подписку вместе с тарифом — тариф нужен для определения
+        # стратегии сброса панели (выравнивание докупки)
+        subscription_query = (
+            select(Subscription).where(Subscription.id == subscription_id).options(selectinload(Subscription.tariff))
+        )
         subscription_result = await db.execute(subscription_query)
         subscription = subscription_result.scalar_one_or_none()
 
@@ -533,10 +554,6 @@ class DailySubscriptionService:
         # Защита от отрицательного базового лимита
         base_limit = max(0, base_limit)
 
-        # Удаляем истекшие записи
-        for purchase in expired_purchases:
-            await db.delete(purchase)
-
         # Рассчитываем новый лимит
         new_purchased = old_purchased - total_expired_gb
         new_limit = base_limit + new_purchased
@@ -550,6 +567,30 @@ class DailySubscriptionService:
             )
             new_limit = base_limit
             new_purchased = 0
+
+        new_limit = max(0, new_limit)
+        new_purchased = max(0, new_purchased)
+
+        # ВЫРАВНИВАНИЕ: не роняем лимит, пока панель сама не обнулит used. Иначе на
+        # тарифах с периодическим сбросом панели (MONTH/MONTH_ROLLING/DAY/WEEK) падение
+        # лимита докупки попадает в середину цикла, used ещё высокий → панель режет
+        # активного юзера. Откладываем понижение до естественного сброса панели — тогда
+        # лимит и used обнуляются согласованно, без окна-режа и без лишнего сброса.
+        # (Для NO_RESET панель used не сбросит — там лимит роняем сразу, а used добиваем
+        # страховкой-clamp ниже.)
+        if await self._should_defer_limit_drop(db, subscription, new_limit, expired_purchases):
+            logger.info(
+                '⏸️ Понижение лимита докупки отложено: ждём периодический сброс used панелью',
+                subscription_id=subscription.id,
+                user_id=subscription.user_id,
+                new_limit_gb=new_limit,
+                current_limit_gb=old_limit,
+            )
+            return
+
+        # Удаляем истекшие записи
+        for purchase in expired_purchases:
+            await db.delete(purchase)
 
         # Обновляем подписку
         subscription.traffic_limit_gb = max(0, new_limit)
@@ -578,7 +619,7 @@ class DailySubscriptionService:
         await db.commit()
 
         logger.info(
-            '🔄 Сброс истекших докупок: подписка было ГБ (базовый: ГБ, докуплено: ГБ), стало ГБ (базовый: ГБ, докуплено: ГБ), убрано ГБ из покупок',
+            '🔄 Сброс истекших докупок трафика',
             subscription_id=subscription.id,
             old_limit=old_limit,
             base_limit=base_limit,
@@ -595,7 +636,35 @@ class DailySubscriptionService:
             from app.services.subscription_service import SubscriptionService
 
             subscription_service = SubscriptionService()
-            await subscription_service.update_remnawave_user(db, subscription)
+            updated_user = await subscription_service.update_remnawave_user(db, subscription)
+
+            # Докупка истекла → лимит уронили к базовому. Но used в панели сам по себе
+            # не сбрасывается. Если used уже выше нового лимита, панель МГНОВЕННО
+            # зарежет активного юзера («вылет в лимит после истечения докупки»).
+            # В этом случае честно сбрасываем израсходованный трафик — ровно то, что
+            # обещает уведомление ниже. Сброс делаем только когда он реально нужен,
+            # чтобы не дарить бесплатный трафик тем, кто базу не исчерпал.
+            new_limit_gb = subscription.traffic_limit_gb or 0
+            if (
+                updated_user is not None
+                and new_limit_gb > 0
+                and updated_user.used_traffic_bytes > subscription_service._gb_to_bytes(new_limit_gb)
+            ):
+                logger.warning(
+                    '⚠️ После истечения докупки used превысил новый лимит — сбрасываем трафик, чтобы не зарезать активного юзера',
+                    subscription_id=subscription.id,
+                    user_id=subscription.user_id,
+                    used_bytes=updated_user.used_traffic_bytes,
+                    new_limit_gb=new_limit_gb,
+                )
+                await subscription_service.update_remnawave_user(
+                    db,
+                    subscription,
+                    reset_traffic=True,
+                    reset_reason='истечение докупленного трафика',
+                )
+                subscription.traffic_used_gb = 0.0
+                await db.commit()
         except Exception as e:
             logger.warning('Не удалось синхронизировать с RemnaWave после сброса трафика', error=e)
             from app.services.remnawave_retry_queue import remnawave_retry_queue
@@ -612,6 +681,85 @@ class DailySubscriptionService:
             user = await get_user_by_id(db, subscription.user_id)
             if user:
                 await self._notify_traffic_reset(user, subscription, total_expired_gb)
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        """Гарантирует tz-aware UTC (на случай naive datetime из БД)."""
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+    async def _should_defer_limit_drop(
+        self,
+        db: AsyncSession,
+        subscription: Subscription,
+        new_limit_gb: int,
+        expired_purchases: list,
+    ) -> bool:
+        """Нужно ли отложить понижение лимита докупки до сброса used панелью.
+
+        True — если падение лимита прямо сейчас загонит активного юзера за лимит
+        (used > нового лимита), а панель сама обнулит used позже (MONTH/MONTH_ROLLING/
+        DAY/WEEK). Тогда ждём естественного сброса панели: лимит и used обнулятся
+        согласованно, без окна-режа и без лишнего сброса посреди цикла.
+
+        False — для NO_RESET (панель used не сбрасывает, это делает бот), для безлимита,
+        если used неизвестен, и если докупка просрочена дольше grace (защита от вечного
+        откладывания при рассинхроне стратегий бота и панели).
+        """
+        if new_limit_gb <= 0:
+            return False  # безлимит — за лимит не уйти
+
+        from app.external.remnawave_api import TrafficLimitStrategy
+        from app.services.subscription_service import get_traffic_reset_strategy
+
+        strategy = get_traffic_reset_strategy(subscription.tariff)
+        if strategy == TrafficLimitStrategy.NO_RESET:
+            return False  # панель сама не сбросит — откладывать бессмысленно
+
+        # Защита от вечного откладывания: если докупка просрочена дольше одного
+        # цикла сброса (с запасом), не ждём больше — понижаем лимит, used добьёт clamp.
+        now = datetime.now(UTC)
+        anchors = [self._as_utc(p.expires_at) for p in expired_purchases if getattr(p, 'expires_at', None)]
+        if anchors and (now - max(anchors)) > timedelta(days=40):
+            logger.warning(
+                '⚠️ Докупка просрочена >40д, а used не сброшен панелью — понижаем лимит без откладывания',
+                subscription_id=subscription.id,
+                user_id=subscription.user_id,
+            )
+            return False
+
+        used_gb = await self._get_panel_used_gb(db, subscription)
+        if used_gb is None:
+            return False  # used неизвестен — применяем понижение, страховка-clamp разрулит
+        return used_gb > new_limit_gb
+
+    async def _get_panel_used_gb(self, db: AsyncSession, subscription: Subscription) -> float | None:
+        """Текущий израсходованный трафик из панели в ГБ. None — если узнать не удалось."""
+        from app.services.subscription_service import SubscriptionService
+
+        service = SubscriptionService()
+        if settings.is_multi_tariff_enabled():
+            panel_user_id = getattr(subscription, 'remnawave_id', None)
+        else:
+            user = await get_user_by_id(db, subscription.user_id)
+            panel_user_id = getattr(user, 'remnawave_id', None) if user else None
+        if panel_user_id is None:
+            return None
+
+        try:
+            async with service.get_api_client() as api:
+                panel_user = await api.get_user_by_id(panel_user_id)
+        except Exception as exc:
+            logger.warning(
+                'Не удалось получить used из панели для выравнивания докупки — применим понижение со страховкой',
+                subscription_id=subscription.id,
+                user_id=subscription.user_id,
+                error=exc,
+            )
+            return None
+
+        if panel_user is None:
+            return None
+        return service._bytes_to_gb(panel_user.used_traffic_bytes)
 
     async def _notify_traffic_reset(self, user: User, subscription: Subscription, reset_gb: int):
         """Уведомляет пользователя о сбросе докупленного трафика."""
@@ -676,8 +824,10 @@ class DailySubscriptionService:
                             # чтобы _process_single_charge корректно его обновил при списании.
                             # Если списание упадёт, подписка останется без last_daily_charge_at
                             # и будет подхвачена на следующем цикле.
+                            _sub_id = subscription.id
                             subscription.status = SubscriptionStatus.ACTIVE.value
                             await db.commit()
+                            subscription = await self._reload_daily_subscription(db, _sub_id)
 
                             logger.info(
                                 '✅ Суточная подписка возобновлена (DISABLED→ACTIVE, баланс пополнен)',
@@ -708,8 +858,10 @@ class DailySubscriptionService:
                     for subscription in expired_subs:
                         try:
                             # Восстанавливаем в ACTIVE — charge обновит end_date и last_daily_charge_at
+                            _sub_id = subscription.id
                             subscription.status = SubscriptionStatus.ACTIVE.value
                             await db.commit()
+                            subscription = await self._reload_daily_subscription(db, _sub_id)
 
                             logger.warning(
                                 '🔄 Суточная подписка восстановлена (EXPIRED→ACTIVE, ошибочный expire)',
@@ -744,7 +896,7 @@ class DailySubscriptionService:
         self._running = True
         interval_minutes = self.get_check_interval_minutes()
 
-        logger.info('🔄 Запуск сервиса суточных подписок (интервал: мин)', interval_minutes=interval_minutes)
+        logger.info('🔄 Запуск сервиса суточных подписок', interval_minutes=interval_minutes)
 
         while self._running:
             try:
@@ -752,7 +904,7 @@ class DailySubscriptionService:
                 resume_stats = await self.process_auto_resume()
                 if resume_stats['resumed'] > 0 or resume_stats['recovered'] > 0:
                     logger.info(
-                        '📊 Авто-возобновление: возобновлено=, восстановлено=, ошибок=',
+                        '📊 Авто-возобновление завершено',
                         resumed=resume_stats['resumed'],
                         recovered=resume_stats['recovered'],
                         errors=resume_stats['errors'],
@@ -763,7 +915,7 @@ class DailySubscriptionService:
 
                 if stats['charged'] > 0 or stats['suspended'] > 0:
                     logger.info(
-                        '📊 Суточные списания: проверено=, списано=, приостановлено=, ошибок',
+                        '📊 Суточные списания завершены',
                         stats=stats['checked'],
                         stats_2=stats['charged'],
                         stats_3=stats['suspended'],
@@ -774,13 +926,45 @@ class DailySubscriptionService:
                 traffic_stats = await self.process_traffic_resets()
                 if traffic_stats['reset'] > 0:
                     logger.info(
-                        '📊 Сброс трафика: проверено=, сброшено=, ошибок',
+                        '📊 Сброс трафика завершён',
                         traffic_stats=traffic_stats['checked'],
                         traffic_stats_2=traffic_stats['reset'],
                         traffic_stats_3=traffic_stats['errors'],
                     )
             except Exception as e:
                 logger.error('Ошибка в цикле проверки суточных подписок', error=e, exc_info=True)
+
+            await asyncio.sleep(interval_minutes * 60)
+
+    async def start_traffic_reset_monitoring(self):
+        """Периодический сброс истёкших докупок трафика БЕЗ суточных списаний.
+
+        Запускается, когда суточные подписки выключены (DAILY_SUBSCRIPTIONS_ENABLED=
+        False). Сброс докупленного трафика — общая механика для ЛЮБОЙ установки,
+        продающей пакеты ГБ, и не должен зависеть от суточных тарифов. Без этого
+        истёкшая докупка роняет лимит резко мимо защиты _reset_subscription_traffic
+        (defer + честный сброс used панелью) → активный юзер уходит в минус по
+        трафику (60/50), баг #630055.
+        """
+        self._running = True
+        interval_minutes = self.get_check_interval_minutes()
+        logger.info(
+            '🔄 Запуск сброса докупок трафика (суточные тарифы выключены)',
+            interval_minutes=interval_minutes,
+        )
+
+        while self._running:
+            try:
+                traffic_stats = await self.process_traffic_resets()
+                if traffic_stats['reset'] > 0:
+                    logger.info(
+                        '📊 Сброс трафика завершён',
+                        traffic_stats=traffic_stats['checked'],
+                        traffic_stats_2=traffic_stats['reset'],
+                        traffic_stats_3=traffic_stats['errors'],
+                    )
+            except Exception as e:
+                logger.error('Ошибка в цикле сброса докупок трафика', error=e, exc_info=True)
 
             await asyncio.sleep(interval_minutes * 60)
 

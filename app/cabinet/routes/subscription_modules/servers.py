@@ -239,9 +239,9 @@ async def update_countries(
 
         subscription_service = SubscriptionService()
         _has_panel = (
-            getattr(subscription, 'remnawave_uuid', None)
+            getattr(subscription, 'remnawave_id', None)
             if settings.is_multi_tariff_enabled()
-            else getattr(user, 'remnawave_uuid', None)
+            else getattr(user, 'remnawave_id', None)
         )
         if _has_panel:
             await subscription_service.update_remnawave_user(db, subscription, sync_squads=True)
@@ -258,6 +258,31 @@ async def update_countries(
         )
 
     await db.refresh(subscription)
+
+    # Yandex.Metrika offline conversion — only when charges happened (adding
+    # paid countries). Sibling to #558449 — this endpoint uses a free-form
+    # dict body so we read `yandex_cid` defensively (validation matches
+    # the regex used by the typed schemas).
+    if total_cost > 0:
+        raw_cid = request.get('yandex_cid')
+        cid: str | None = None
+        if isinstance(raw_cid, str):
+            import re
+
+            if re.fullmatch(r'[A-Za-z0-9._:-]{4,128}', raw_cid):
+                cid = raw_cid
+        try:
+            from app.services import yandex_offline_conv_service as yandex_conv
+
+            # Purchase event fires centrally from create_transaction; here we
+            # only persist the request-body CID synchronously (#558449).
+            await yandex_conv.store_cid_only(user.id, cid)
+        except Exception as yconv_err:
+            logger.debug(
+                'yandex_conv purchase hook failed (non-fatal)',
+                user_id=user.id,
+                error=str(yconv_err),
+            )
 
     return {
         'message': 'Countries updated successfully',

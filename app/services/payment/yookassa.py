@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from importlib import import_module
@@ -211,7 +212,7 @@ class YooKassaPaymentMixin:
             )
 
             logger.info(
-                'Создан платеж YooKassa на ₽ для пользователя',
+                'Создан платеж YooKassa',
                 yookassa_response=yookassa_response['id'],
                 amount_rubles=amount_rubles,
                 user_id=user_id,
@@ -301,7 +302,7 @@ class YooKassaPaymentMixin:
             )
 
             logger.info(
-                'Создан платеж YooKassa СБП на ₽ для пользователя',
+                'Создан платеж YooKassa СБП',
                 yookassa_response=yookassa_response['id'],
                 amount_rubles=amount_rubles,
                 user_id=user_id,
@@ -396,7 +397,7 @@ class YooKassaPaymentMixin:
 
             if transaction_id:
                 logger.info(
-                    'Пропускаем повторную обработку платежа YooKassa : уже связан с транзакцией',
+                    'Пропускаем повторную обработку платежа YooKassa: уже связан с транзакцией',
                     yookassa_payment_id=payment.yookassa_payment_id,
                     transaction_id=transaction_id,
                 )
@@ -437,7 +438,7 @@ class YooKassaPaymentMixin:
             # Fast-path: already processed
             if getattr(payment, 'transaction_id', None):
                 logger.info(
-                    'Платеж YooKassa уже обработан (transaction_id=), пропускаем.',
+                    'Платеж YooKassa уже обработан, пропускаем.',
                     yookassa_payment_id=payment.yookassa_payment_id,
                     transaction_id=payment.transaction_id,
                 )
@@ -550,7 +551,7 @@ class YooKassaPaymentMixin:
 
                 if transaction and processing_completed:
                     logger.info(
-                        'Пропускаем повторную обработку платежа YooKassa : транзакция уже завершила начисление.',
+                        'Пропускаем повторную обработку платежа YooKassa: транзакция уже завершила начисление.',
                         yookassa_payment_id=payment.yookassa_payment_id,
                         existing_transaction_id=existing_transaction_id,
                     )
@@ -759,7 +760,7 @@ class YooKassaPaymentMixin:
                                     )
                             else:
                                 logger.error(
-                                    'Не удалось активировать триал для',
+                                    'Не удалось активировать триал',
                                     subscription_id=subscription_id,
                                     user_id=user.id,
                                 )
@@ -1166,14 +1167,14 @@ class YooKassaPaymentMixin:
 
             if is_simple_subscription:
                 logger.info(
-                    'Успешно обработан платеж YooKassa как покупка подписки: пользователь , сумма ₽',
+                    'Успешно обработан платеж YooKassa как покупка подписки',
                     yookassa_payment_id=payment.yookassa_payment_id,
                     user_id=payment.user_id,
                     amount_rubles=payment.amount_kopeks / 100,
                 )
             else:
                 logger.info(
-                    'Успешно обработан платеж YooKassa : пользователь пополнил баланс на ₽',
+                    'Успешно обработан платеж YooKassa: пользователь пополнил баланс',
                     yookassa_payment_id=payment.yookassa_payment_id,
                     user_id=payment.user_id,
                     amount_rubles=payment.amount_kopeks / 100,
@@ -1431,6 +1432,29 @@ class YooKassaPaymentMixin:
                 exc_info=True,
             )
 
+    async def _send_nalogo_receipt_to_user(
+        self,
+        telegram_user_id: int | None,
+        receipt_uuid: str,
+        amount_kopeks: int,
+        user_email: str | None = None,
+    ) -> None:
+        """Отправляет пользователю ссылку на фискальный чек НПД и дублирует в админ-топик."""
+        if not hasattr(self, 'nalogo_service') or not self.nalogo_service:
+            return
+
+        from app.services.nalogo_service import send_nalogo_receipt_notifications
+
+        await send_nalogo_receipt_notifications(
+            bot=getattr(self, 'bot', None),
+            nalogo_service=self.nalogo_service,
+            receipt_uuid=receipt_uuid,
+            amount_kopeks=amount_kopeks,
+            telegram_user_id=telegram_user_id,
+            context_label='Источник: YooKassa',
+            user_email=user_email,
+        )
+
     async def process_yookassa_webhook(
         self,
         db: AsyncSession,
@@ -1441,14 +1465,42 @@ class YooKassaPaymentMixin:
         yookassa_payment_id = event_object.get('id')
 
         if not yookassa_payment_id:
-            logger.warning('Webhook без payment id', event=event)
+            # 'event' зарезервировано в structlog (это само сообщение лога), нельзя
+            # передавать его как kwarg — иначе TypeError. Берём другое имя.
+            logger.warning('Webhook без payment id', webhook_event=event)
             return False
 
+        # Defence-in-depth cross-check: re-request the payment from the
+        # YooKassa API. YooKassa does NOT sign its webhooks (per the docs
+        # at https://yookassa.ru/developers/using-api/webhooks authenticity
+        # is verified either by sender IP or by re-requesting the object),
+        # so the incoming ``Signature`` header is NOT verifiable and the raw
+        # payload must never be trusted on its own.
+        #
+        # Two modes:
+        #   * IP gate ON (default): the request already passed the YooKassa
+        #     IP allowlist, so this API call is best-effort. Tight 8s budget;
+        #     on timeout/error we fall back to the payload status. This avoids
+        #     the incident where a mandatory 30s call serialised webhook
+        #     processing on the YK executor during API degradation.
+        #   * IP gate OFF (YOOKASSA_SKIP_IP_CHECK): there is no IP barrier, so
+        #     the API confirmation becomes MANDATORY (fail-closed) — see the
+        #     guard below. Without it a forged ``payment.succeeded`` for a
+        #     non-existent id would credit an attacker via the restore path.
         remote_data: dict[str, Any] | None = None
         if getattr(self, 'yookassa_service', None):
             try:
-                remote_data = await self.yookassa_service.get_payment_info(  # type: ignore[union-attr]
-                    yookassa_payment_id
+                remote_data = await asyncio.wait_for(
+                    self.yookassa_service.get_payment_info(  # type: ignore[union-attr]
+                        yookassa_payment_id
+                    ),
+                    timeout=8,
+                )
+            except TimeoutError:
+                logger.warning(
+                    'YooKassa API не ответил за 8с при cross-check webhook — используем payload без подтверждения',
+                    yookassa_payment_id=yookassa_payment_id,
+                    payload_status=event_object.get('status'),
                 )
             except Exception as error:  # pragma: no cover - диагностический лог
                 logger.warning(
@@ -1458,12 +1510,26 @@ class YooKassaPaymentMixin:
                     exc_info=True,
                 )
 
+        # Fail-closed: with the IP allowlist disabled, the only proof of
+        # authenticity is the YooKassa API confirmation. No confirmation
+        # (404 / timeout / error → remote_data is None) means the payload
+        # cannot be trusted, so we refuse to process and return a non-200
+        # to make YooKassa retry the genuine notification later.
+        if settings.YOOKASSA_SKIP_IP_CHECK and remote_data is None:
+            logger.warning(
+                'YooKassa webhook отклонён: YOOKASSA_SKIP_IP_CHECK включён, но API YooKassa '
+                'не подтвердил платёж — fail-closed, начисление не выполнено',
+                yookassa_payment_id=yookassa_payment_id,
+                payload_status=event_object.get('status'),
+            )
+            return False
+
         if remote_data:
             previous_status = event_object.get('status')
             event_object = self._merge_remote_yookassa_payload(event_object, remote_data)
             if previous_status and event_object.get('status') != previous_status:
                 logger.info(
-                    'Статус платежа YooKassa скорректирован по данным API: →',
+                    'Статус платежа YooKassa скорректирован по данным API',
                     yookassa_payment_id=yookassa_payment_id,
                     previous_status=previous_status,
                     event_object=event_object.get('status'),
@@ -1655,7 +1721,7 @@ class YooKassaPaymentMixin:
                 yookassa_created_at = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
             except Exception as error:  # pragma: no cover - диагностический лог
                 logger.debug(
-                    'Не удалось распарсить created_at= для YooKassa',
+                    'Не удалось распарсить created_at для YooKassa',
                     created_at_raw=created_at_raw,
                     yookassa_payment_id=yookassa_payment_id,
                     error=error,
