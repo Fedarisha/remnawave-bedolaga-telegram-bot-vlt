@@ -2055,6 +2055,28 @@ class RemnaWaveService:
                 bot_users_by_email=len(bot_users_by_email),
             )
 
+            # Дедупликация ниже («у этого юзера уже есть подписка с этим панельным
+            # id?») работает только по числовому remnawave_id. До бэкфила он NULL у
+            # ВСЕХ доапгрейдных подписок, поэтому проверка не находит совпадений
+            # никогда, и синк заводит вторую подписку каждому пользователю панели.
+            # Апстрим от этого прикрыт частичным UNIQUE (user_id, tariff_id) —
+            # форк его намеренно снял (миграция 0059), так что здесь нужен явный
+            # предохранитель. Обновления существующих строк не трогаем: они и
+            # чинят идентичность.
+            from app.services.remnawave_identity_backfill import (
+                legacy_identity_backfill_pending,
+                subscriptions_carry_unbackfilled_identity,
+            )
+
+            _identity_backfill_pending = await legacy_identity_backfill_pending(db)
+            _skipped_pending_backfill = 0
+            if _identity_backfill_pending:
+                logger.error(
+                    '⛔ [multi-tariff] Бэкфил панельных id не выполнен — создание подписок из панели отключено '
+                    'на этот проход. Запустите `make backfill-remnawave-ids` (сухой прогон) и '
+                    '`make backfill-remnawave-ids-apply`, иначе синк задублирует подписки.'
+                )
+
             # Match and update
             for panel_user in panel_users:
                 panel_user_id = _normalize_panel_user_id(panel_user.get('id'))
@@ -2131,6 +2153,14 @@ class RemnaWaveService:
 
                     # Check if subscription with this panel id already exists for this user
                     if any(_normalize_panel_user_id(s.remnawave_id) == panel_user_id for s in _user_subs):
+                        continue
+
+                    # ...и та же проверка ничего не найдёт, если у пользователя есть
+                    # доапгрейдные строки без числового id: для НЕГО создавать нельзя
+                    # (см. предупреждение о бэкфиле выше). Пользователей с уже
+                    # восстановленной идентичностью это не блокирует.
+                    if _identity_backfill_pending and subscriptions_carry_unbackfilled_identity(_user_subs):
+                        _skipped_pending_backfill += 1
                         continue
 
                     try:
@@ -2294,6 +2324,14 @@ class RemnaWaveService:
                     stats['errors'] += 1
 
             await db.commit()
+
+            if _skipped_pending_backfill:
+                logger.error(
+                    '⛔ [multi-tariff] Создание подписок пропущено: не выполнен бэкфил панельных id',
+                    skipped=_skipped_pending_backfill,
+                    hint='make backfill-remnawave-ids-apply',
+                )
+                stats['skipped_pending_backfill'] = _skipped_pending_backfill
 
             logger.info(
                 '🎯 [multi-tariff] Синхронизация завершена',

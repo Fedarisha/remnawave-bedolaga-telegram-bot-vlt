@@ -33,7 +33,7 @@ someone else's VPN account.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -840,3 +840,36 @@ async def _backfill_grace_sessions(
         report.applied.append(
             AppliedRow(kind='grace_session', row_id=str(session.id), panel_id=int(panel_id), strategy=grace_strategy)
         )
+
+
+async def legacy_identity_backfill_pending(db: AsyncSession) -> bool:
+    """True пока есть подписки с легаси-идентичностью и без числового ``remnawave_id``.
+
+    Гейты «создать новую строку или переиспользовать существующую», которые решают
+    это ТОЛЬКО по числовому id, до бэкфила слепы: каждая доапгрейдная подписка
+    выглядит непривязанной, и ветка создания заводит дубль того, что уже есть.
+    Такой гейт обязан спросить это здесь и воздержаться от создания.
+    """
+    result = await db.execute(
+        select(Subscription.id)
+        .where(
+            Subscription.remnawave_id.is_(None),
+            or_(
+                Subscription.remnawave_uuid.isnot(None),
+                Subscription.remnawave_short_uuid.isnot(None),
+            ),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+def subscriptions_carry_unbackfilled_identity(subscriptions: Iterable[Subscription]) -> bool:
+    """True если среди подписок пользователя есть легаси-строка без числового id.
+
+    Пер-юзерная версия :func:`legacy_identity_backfill_pending`: дедупликация
+    «у этого пользователя уже есть подписка с этим панельным id?» слепа ровно на
+    таких строках, поэтому создавать новую подписку нельзя именно этому
+    пользователю — остальных блокировать не нужно.
+    """
+    return any(sub.remnawave_id is None and (sub.remnawave_uuid or sub.remnawave_short_uuid) for sub in subscriptions)
