@@ -44,16 +44,3 @@ def test_filter_referenced_svg_library_ignores_invalid_or_missing_keys() -> None
     }
 
     assert _filter_referenced_svg_library(svg_library, platforms) == {'kept': '<svg />'}
-
-
-def test_filter_referenced_svg_library_drops_oversized_decorative_bundle() -> None:
-    svg_library = {
-        'large-icon': {'svgString': '<svg>' + ('x' * 8_100) + '</svg>'},
-    }
-    platforms = {
-        'ios': {
-            'apps': [{'svgIconKey': 'large-icon'}],
-        }
-    }
-
-    assert _filter_referenced_svg_library(svg_library, platforms) == {}

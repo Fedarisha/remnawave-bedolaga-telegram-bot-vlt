@@ -38,8 +38,6 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
-MAX_CONNECTION_SVG_LIBRARY_CHARS = 8_000
-
 
 @router.get('/info', response_model=SubscriptionStatusResponse)
 async def get_subscription(
@@ -460,21 +458,7 @@ def _filter_referenced_svg_library(
                 collect(nested_value)
 
     collect(platforms)
-    filtered_library = {key: value for key, value in svg_library.items() if key in referenced_keys}
-
-    # SVGs are decorative in the connection UI.  Avoid returning a bulky icon
-    # bundle when it would dominate the response; text, links and instructions
-    # remain fully functional without it.
-    approximate_size = sum(len(str(value)) for value in filtered_library.values())
-    if approximate_size > MAX_CONNECTION_SVG_LIBRARY_CHARS:
-        logger.info(
-            'Omitting oversized connection SVG library',
-            referenced_icons=len(filtered_library),
-            approximate_size=approximate_size,
-        )
-        return {}
-
-    return filtered_library
+    return {key: value for key, value in svg_library.items() if key in referenced_keys}
 
 
 @router.get('/app-config')
