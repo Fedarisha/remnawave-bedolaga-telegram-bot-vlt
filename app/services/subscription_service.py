@@ -341,6 +341,40 @@ class SubscriptionService:
         )
         return panel_user
 
+    async def _adopt_panel_user_by_username(self, api: RemnaWaveAPI, user, username: str) -> RemnaWaveUser | None:
+        """Опознать панельного пользователя подписки по username — последний шанс до создания.
+
+        Нужен строкам, у которых нет ни числового id (бэкфил ещё не проходил), ни
+        shortUuid, — для них адопция по shortUuid бессильна, а в multi-tariff нет и
+        фоллбека по telegramId: у человека несколько панельных аккаунтов с одним
+        telegramId, и выбор был бы наугад. По username выбор однозначен: в
+        multi-tariff он несёт per-subscription суффикс ``remnawave_short_id``
+        (на этом же основан бэкфил, стратегия «reconstructed username»).
+
+        ``GET /api/users/by-username`` пережил 3.0.0. Ошибку не глушим по той же
+        причине, что и в адопции по shortUuid: «не знаем» не должно превращаться в
+        «создаём дубль рядом с живым оплаченным аккаунтом».
+        """
+        if not username:
+            return None
+        panel_user = await api.get_user_by_username(username)
+        if panel_user is None:
+            return None
+        panel_telegram_id = getattr(panel_user, 'telegram_id', None)
+        if user.telegram_id and panel_telegram_id and panel_telegram_id != user.telegram_id:
+            logger.warning(
+                '⚠️ Аккаунт с таким username принадлежит другому telegram_id — не привязываем',
+                username=username,
+                panel_telegram_id=panel_telegram_id,
+            )
+            return None
+        logger.info(
+            '🔗 Панельный пользователь опознан по username — дубль не создаём',
+            username=username,
+            remnawave_id=panel_user.id,
+        )
+        return panel_user
+
     async def _panel_id_is_free_for(self, db: AsyncSession, subscription, panel_id: int | None) -> bool:
         """Не держит ли этот панельный id уже ДРУГАЯ строка подписок.
 
@@ -536,6 +570,28 @@ class SubscriptionService:
             user_id=user.id,
             suffix=f'_{short_suffix}',
         )
+
+        # Последняя проверка перед созданием: строка без числового id и без
+        # shortUuid всё ещё может иметь живой оплаченный аккаунт в панели —
+        # опознаём его по username, иначе рядом появится ВТОРОЙ аккаунт, а
+        # выданная пользователю ссылка на подписку сменится.
+        adopted_by_username = await self._adopt_panel_user_by_username(api, user, username)
+        if adopted_by_username is not None:
+            if db is None or await self._panel_id_is_free_for(db, subscription, adopted_by_username.id):
+                subscription.remnawave_id = adopted_by_username.id
+            else:
+                logger.warning(
+                    '⚠️ Панельный id уже закреплён за другой подпиской — колонку не трогаем',
+                    subscription_id=getattr(subscription, 'id', None),
+                    remnawave_id=adopted_by_username.id,
+                )
+            if settings.RESET_DEVICES_ON_RENEWAL:
+                if not await api.reset_user_devices(adopted_by_username.id):
+                    logger.error('⚠️ Не удалось сбросить HWID', panel_user_id=adopted_by_username.id)
+            updated = await api.update_user(user_id=adopted_by_username.id, **common_kwargs)
+            if reset_traffic:
+                await self._reset_user_traffic(api, updated.id, user, reset_reason)
+            return updated
 
         updated_user = await api.create_user(username=username, **common_kwargs)
         if reset_traffic:
