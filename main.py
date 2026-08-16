@@ -466,15 +466,13 @@ async def main():
                 stage.warning(f'Grace-доступ безопасно отключён из-за ошибки конфигурации: {e}')
                 logger.error('Ошибка запуска grace-доступа; основной бот продолжает работу', error=e)
 
-        # Разовая фоновая чистка накопившихся дублей тарифных подписок (multi-tariff):
-        # лишние истёкшие дубли удаляются из БД и панели вместе, как штатное удаление.
-        # Идемпотентно — после первой чистки no-op; панель легла — повторит на след. старте.
-        try:
-            from app.services.subscription_dedup_service import dedupe_expired_tariff_subscriptions
-
-            asyncio.create_task(dedupe_expired_tariff_subscriptions())
-        except Exception as e:
-            logger.warning('Не удалось запустить чистку дублей подписок', error=e)
+        # Апстримовая разовая чистка дублей тарифных подписок В ФОРКЕ НЕ ЗАПУСКАЕТСЯ.
+        # Она схлопывает несколько подписок на один тариф у пользователя, оставляя
+        # «самую живую» и удаляя остальные EXPIRED/DISABLED. Для апстрима это мусор
+        # (там (user_id, tariff_id) уникален по частичному индексу), а здесь повторная
+        # покупка того же тарифа — штатный сценарий, и такие строки — история, а не
+        # дубли. Безвозвратное удаление при старте недопустимо; функция оставлена в
+        # app/services/subscription_dedup_service.py и вызывается вручную, если нужно.
 
         payment_service = PaymentService(bot)
         auto_payment_verification_service.set_payment_service(payment_service)
