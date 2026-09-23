@@ -96,6 +96,22 @@ class DailySubscriptionService:
 
         return user, tariff
 
+    @staticmethod
+    def _calculate_daily_price(user: User, tariff: Tariff) -> int:
+        """Рассчитывает суточную стоимость тарифа с учётом скидки промогруппы пользователя."""
+        raw_daily_price = tariff.daily_price_kopeks
+        if raw_daily_price <= 0:
+            return 0
+        from app.services.pricing_engine import PricingEngine
+
+        promo_group = PricingEngine.resolve_promo_group(user)
+        daily_group_pct = promo_group.get_discount_percent('period', 1) if promo_group else 0
+        return (
+            PricingEngine.apply_discount(raw_daily_price, daily_group_pct)
+            if daily_group_pct > 0
+            else raw_daily_price
+        )
+
     async def process_daily_charges(self) -> dict:
         """
         Обрабатывает суточные списания.
@@ -185,21 +201,18 @@ class DailySubscriptionService:
 
         user = await lock_user_for_pricing(db, user.id)
 
-        # Apply group discount to daily price (consistent with PricingEngine._calculate_switch_to_daily)
-        from app.services.pricing_engine import PricingEngine
-
-        promo_group = PricingEngine.resolve_promo_group(user)
-        daily_group_pct = promo_group.get_discount_percent('period', 1) if promo_group else 0
-        daily_price = (
-            PricingEngine.apply_discount(raw_daily_price, daily_group_pct) if daily_group_pct > 0 else raw_daily_price
-        )
+        daily_price = self._calculate_daily_price(user, tariff)
 
         # Проверяем баланс (при 100% скидке — пропускаем)
         if daily_price > 0 and user.balance_kopeks < daily_price:
+            was_active = (subscription.status == SubscriptionStatus.ACTIVE.value)
+
             # Недостаточно средств - приостанавливаем подписку
             await suspend_daily_subscription_insufficient_balance(db, subscription)
 
-            # Уведомляем пользователя (rate-limit: 1 раз в 6 часов)
+            # Уведомляем пользователя только один раз за ситуацию:
+            # отправляем, если подписка была активна и уведомление за текущую ситуацию ещё не уходило.
+            # Метка сохраняется на всё время приостановки (до успешного списания / возобновления).
             if self._bot:
                 from app.utils.cache import cache
 
@@ -209,10 +222,15 @@ class DailySubscriptionService:
                 except Exception:
                     already_notified = None
 
-                if not already_notified:
+                if not already_notified and was_active:
                     await self._notify_insufficient_balance(user, subscription, daily_price)
                     try:
-                        await cache.set(cache_key, '1', expire=21600)  # 6 hours
+                        await cache.set(cache_key, '1', expire=7776000)  # 90 дней fallback
+                    except Exception:
+                        pass
+                elif not already_notified:
+                    try:
+                        await cache.set(cache_key, '1', expire=7776000)
                     except Exception:
                         pass
 
@@ -261,6 +279,14 @@ class DailySubscriptionService:
             # Атомарный коммит: баланс + транзакция + charge_time
             await db.commit()
             await db.refresh(user)
+
+            # Ситуация нехватки средств разрешена (списание прошло успешно) — очищаем отметку
+            try:
+                from app.utils.cache import cache
+
+                await cache.delete(f'daily_insuf_notify:{subscription.id}')
+            except Exception:
+                pass
 
             user_id_display = user.telegram_id or user.email or f'#{user.id}'
             logger.info(
@@ -820,10 +846,16 @@ class DailySubscriptionService:
                                 stats['resumed'] += 1
                                 continue
 
-                            # Только активируем — НЕ ставим last_daily_charge_at,
-                            # чтобы _process_single_charge корректно его обновил при списании.
-                            # Если списание упадёт, подписка останется без last_daily_charge_at
-                            # и будет подхвачена на следующем цикле.
+                            user, tariff = await self._load_subscription_context(db, subscription)
+                            if not user or not tariff:
+                                continue
+
+                            daily_price = self._calculate_daily_price(user, tariff)
+                            if daily_price > 0 and user.balance_kopeks < daily_price:
+                                # Средств всё ещё недостаточно — подписка остаётся DISABLED.
+                                # НЕ переводим в ACTIVE, чтобы не вызывать flapping и повторные списания/уведомления.
+                                continue
+
                             _sub_id = subscription.id
                             subscription.status = SubscriptionStatus.ACTIVE.value
                             await db.commit()
@@ -857,6 +889,15 @@ class DailySubscriptionService:
                     expired_subs = await get_expired_daily_subscriptions_for_recovery(db)
                     for subscription in expired_subs:
                         try:
+                            user, tariff = await self._load_subscription_context(db, subscription)
+                            if not user or not tariff:
+                                continue
+
+                            daily_price = self._calculate_daily_price(user, tariff)
+                            if daily_price > 0 and user.balance_kopeks < daily_price:
+                                # Средств всё ещё недостаточно — не восстанавливаем
+                                continue
+
                             # Восстанавливаем в ACTIVE — charge обновит end_date и last_daily_charge_at
                             _sub_id = subscription.id
                             subscription.status = SubscriptionStatus.ACTIVE.value

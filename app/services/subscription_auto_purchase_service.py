@@ -2839,6 +2839,14 @@ async def try_resume_disabled_daily_after_topup(
         subscription_id=subscription.id,
     )
 
+    # Очищаем отметку об уведомлении о нехватке средств
+    try:
+        from app.utils.cache import cache
+
+        await cache.delete(f'daily_insuf_notify:{subscription.id}')
+    except Exception:
+        pass
+
     # Create transaction
     transaction = None
     try:

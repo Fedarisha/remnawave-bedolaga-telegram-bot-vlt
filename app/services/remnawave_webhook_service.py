@@ -1111,6 +1111,14 @@ class RemnaWaveWebhookService:
         """Mark subscription as recently updated by webhook to prevent sync overwrite."""
         subscription.last_webhook_update_at = datetime.now(UTC)
 
+    @staticmethod
+    def _is_daily_subscription(subscription: Subscription | None) -> bool:
+        """Проверяет, привязана ли подписка к суточному тарифу."""
+        if not subscription:
+            return False
+        tariff = sa_inspect(subscription).dict.get('tariff')
+        return bool(tariff and getattr(tariff, 'is_daily', False) is True)
+
     # ------------------------------------------------------------------
     # User event handlers
     # ------------------------------------------------------------------
@@ -1714,6 +1722,9 @@ class RemnaWaveWebhookService:
         if not subscription:
             logger.info('Webhook expires_72h: подписка не найдена в БД, пропуск', user_id=user.id)
             return
+        if self._is_daily_subscription(subscription):
+            logger.info('Webhook expires_72h: пропуск для суточной подписки', user_id=user.id)
+            return
         await self._notify_user(
             user,
             'WEBHOOK_SUB_EXPIRES_72H',
@@ -1726,6 +1737,9 @@ class RemnaWaveWebhookService:
     ) -> None:
         if not subscription:
             logger.info('Webhook expires_48h: подписка не найдена в БД, пропуск', user_id=user.id)
+            return
+        if self._is_daily_subscription(subscription):
+            logger.info('Webhook expires_48h: пропуск для суточной подписки', user_id=user.id)
             return
         await self._notify_user(
             user,
@@ -1740,6 +1754,9 @@ class RemnaWaveWebhookService:
         if not subscription:
             logger.info('Webhook expires_24h: подписка не найдена в БД, пропуск', user_id=user.id)
             return
+        if self._is_daily_subscription(subscription):
+            logger.info('Webhook expires_24h: пропуск для суточной подписки', user_id=user.id)
+            return
         await self._notify_user(
             user,
             'WEBHOOK_SUB_EXPIRES_24H',
@@ -1752,6 +1769,9 @@ class RemnaWaveWebhookService:
     ) -> None:
         if not subscription:
             logger.info('Webhook expired_24h_ago: подписка не найдена в БД, пропуск', user_id=user.id)
+            return
+        if self._is_daily_subscription(subscription):
+            logger.info('Webhook expired_24h_ago: пропуск для суточной подписки', user_id=user.id)
             return
         await self._notify_user(
             user,
@@ -1772,6 +1792,9 @@ class RemnaWaveWebhookService:
         """
         if not subscription:
             logger.info('Webhook user.expiration: подписка не найдена в БД, пропуск', user_id=user.id)
+            return
+        if self._is_daily_subscription(subscription):
+            logger.info('Webhook user.expiration: пропуск для суточной подписки', user_id=user.id)
             return
 
         # Ресивер кладёт envelope-meta вебхука в data['_meta'] (см.

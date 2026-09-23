@@ -2943,6 +2943,14 @@ async def resume_daily_subscription(
     await db.commit()
     await db.refresh(subscription)
 
+    # Очищаем отметку об уведомлении о нехватке средств для этой подписки
+    try:
+        from app.utils.cache import cache
+
+        await cache.delete(f'daily_insuf_notify:{subscription.id}')
+    except Exception:
+        pass
+
     logger.info(
         '▶️ Суточная подписка возобновлена пользователем', subscription_id=subscription.id, user_id=subscription.user_id
     )
