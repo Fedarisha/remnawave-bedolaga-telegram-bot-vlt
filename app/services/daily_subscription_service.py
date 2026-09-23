@@ -102,15 +102,19 @@ class DailySubscriptionService:
         raw_daily_price = tariff.daily_price_kopeks
         if raw_daily_price <= 0:
             return 0
-        from app.services.pricing_engine import PricingEngine
+        try:
+            from app.services.pricing_engine import PricingEngine
 
-        promo_group = PricingEngine.resolve_promo_group(user)
-        daily_group_pct = promo_group.get_discount_percent('period', 1) if promo_group else 0
-        return (
-            PricingEngine.apply_discount(raw_daily_price, daily_group_pct)
-            if daily_group_pct > 0
-            else raw_daily_price
-        )
+            promo_group = PricingEngine.resolve_promo_group(user)
+            daily_group_pct = promo_group.get_discount_percent('period', 1) if promo_group else 0
+            return (
+                PricingEngine.apply_discount(raw_daily_price, daily_group_pct)
+                if daily_group_pct > 0
+                else raw_daily_price
+            )
+        except Exception as e:
+            logger.warning('Ошибка расчёта скидки для суточного тарифа', user_id=getattr(user, 'id', None), error=e)
+            return raw_daily_price
 
     async def process_daily_charges(self) -> dict:
         """

@@ -128,11 +128,17 @@ class PricingEngine:
         """Resolve primary promo group: get_primary_promo_group() first, fallback to user.promo_group."""
         if not user:
             return None
-        if hasattr(user, 'get_primary_promo_group'):
-            pg = user.get_primary_promo_group()
-            if pg is not None:
-                return pg
-        return getattr(user, 'promo_group', None)
+        try:
+            if hasattr(user, 'get_primary_promo_group'):
+                pg = user.get_primary_promo_group()
+                if pg is not None:
+                    return pg
+        except Exception:
+            pass
+        try:
+            return getattr(user, 'promo_group', None)
+        except Exception:
+            return None
 
     @staticmethod
     def get_addon_discount_percent(

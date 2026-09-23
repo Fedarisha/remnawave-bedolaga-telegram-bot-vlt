@@ -2804,14 +2804,15 @@ async def get_disabled_daily_subscriptions_for_resume(
     Получает список DISABLED суточных подписок, которые можно возобновить.
     Подписки с достаточным балансом пользователя будут возобновлены.
     """
-    from app.database.models import Tariff, User
+    from app.database.models import Tariff, User, UserPromoGroup
 
     query = (
         select(Subscription)
         .join(Tariff, Subscription.tariff_id == Tariff.id)
         .join(User, Subscription.user_id == User.id)
         .options(
-            selectinload(Subscription.user),
+            selectinload(Subscription.user).selectinload(User.user_promo_groups).selectinload(UserPromoGroup.promo_group),
+            selectinload(Subscription.user).selectinload(User.promo_group),
             selectinload(Subscription.tariff),
         )
         .where(
@@ -2847,7 +2848,7 @@ async def get_expired_daily_subscriptions_for_recovery(db: AsyncSession) -> list
     Суточные подписки не должны экспайриться — ими управляет DailySubscriptionService.
     Если баланс пользователя достаточен, подписку нужно восстановить и списать.
     """
-    from app.database.models import Tariff
+    from app.database.models import Tariff, User, UserPromoGroup
 
     # Берём только недавно экспайренные (до 24ч) — старые не трогаем
     recovery_threshold = datetime.now(UTC) - timedelta(hours=24)
@@ -2857,7 +2858,8 @@ async def get_expired_daily_subscriptions_for_recovery(db: AsyncSession) -> list
         .join(Tariff, Subscription.tariff_id == Tariff.id)
         .join(User, Subscription.user_id == User.id)
         .options(
-            selectinload(Subscription.user),
+            selectinload(Subscription.user).selectinload(User.user_promo_groups).selectinload(UserPromoGroup.promo_group),
+            selectinload(Subscription.user).selectinload(User.promo_group),
             selectinload(Subscription.tariff),
         )
         .where(

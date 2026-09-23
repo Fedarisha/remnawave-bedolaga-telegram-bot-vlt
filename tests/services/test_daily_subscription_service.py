@@ -227,3 +227,17 @@ async def test_process_auto_resume_skips_when_insufficient_balance(
     assert subscription.status == 'disabled'  # Status remains disabled, NO flapping!
 
 
+def test_calculate_daily_price_handles_exceptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    tariff = SimpleNamespace(id=1, daily_price_kopeks=1200)
+
+    class FlakyUser:
+        id = 123
+
+        def get_primary_promo_group(self):
+            raise RuntimeError("Lazy load failed or MissingGreenlet")
+
+    price = DailySubscriptionService._calculate_daily_price(FlakyUser(), tariff)
+    assert price == 1200
+
+
+

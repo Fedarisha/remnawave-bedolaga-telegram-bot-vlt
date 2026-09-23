@@ -2259,7 +2259,10 @@ class User(Base):
             pass
 
         # Fallback на старую связь если новая пустая или возникла ошибка
-        return getattr(self, 'promo_group', None)
+        try:
+            return getattr(self, 'promo_group', None)
+        except Exception:
+            return None
 
     def get_promo_discount(self, category: str, period_days: int | None = None) -> int:
         primary_group = self.get_primary_promo_group()
