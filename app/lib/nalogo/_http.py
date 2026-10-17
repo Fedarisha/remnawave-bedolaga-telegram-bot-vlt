@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from ._tls import create_ssl_context
 from .exceptions import raise_for_status
 
 
@@ -126,7 +127,7 @@ class AsyncHTTPClient:
         if json_data is not None:
             request_kwargs['json'] = json_data
 
-        async with httpx.AsyncClient(proxy=self.proxy_url) as client:
+        async with httpx.AsyncClient(proxy=self.proxy_url, verify=create_ssl_context()) as client:
             # Initial request
             response = await client.request(**request_kwargs)
 

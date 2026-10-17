@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from ._http import AuthProvider
+from ._tls import create_ssl_context
 from .dto.device import DeviceInfo
 from .exceptions import raise_for_status
 
@@ -132,7 +133,7 @@ class AuthProviderImpl(AuthProvider):
             'deviceInfo': self.device_info.model_dump(),
         }
 
-        async with httpx.AsyncClient(proxy=self.proxy_url) as client:
+        async with httpx.AsyncClient(proxy=self.proxy_url, verify=create_ssl_context()) as client:
             response = await client.post(
                 f'{self.base_url_v1}/auth/lkfl',
                 json=request_data,
@@ -167,7 +168,7 @@ class AuthProviderImpl(AuthProvider):
             'requireTpToBeActive': True,
         }
 
-        async with httpx.AsyncClient(proxy=self.proxy_url) as client:
+        async with httpx.AsyncClient(proxy=self.proxy_url, verify=create_ssl_context()) as client:
             response = await client.post(
                 f'{self.base_url_v2}/auth/challenge/sms/start',
                 json=request_data,
@@ -202,7 +203,7 @@ class AuthProviderImpl(AuthProvider):
             'deviceInfo': self.device_info.model_dump(),
         }
 
-        async with httpx.AsyncClient(proxy=self.proxy_url) as client:
+        async with httpx.AsyncClient(proxy=self.proxy_url, verify=create_ssl_context()) as client:
             response = await client.post(
                 f'{self.base_url_v1}/auth/challenge/sms/verify',
                 json=request_data,
@@ -235,7 +236,7 @@ class AuthProviderImpl(AuthProvider):
         }
 
         try:
-            async with httpx.AsyncClient(proxy=self.proxy_url) as client:
+            async with httpx.AsyncClient(proxy=self.proxy_url, verify=create_ssl_context()) as client:
                 response = await client.post(
                     f'{self.base_url_v1}/auth/token',
                     json=request_data,
