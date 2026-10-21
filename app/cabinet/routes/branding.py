@@ -54,7 +54,7 @@ TELEGRAM_OIDC_CLIENT_ID_KEY = 'TELEGRAM_OIDC_CLIENT_ID'
 
 # Default animation config
 DEFAULT_ANIMATION_CONFIG = {
-    'enabled': True,
+    'enabled': False,
     'type': 'aurora',
     'settings': {},
     'opacity': 1.0,
@@ -336,18 +336,18 @@ class AnalyticsCountersUpdate(BaseModel):
 
 # Default theme colors
 DEFAULT_THEME_COLORS = {
-    'accent': '#3b82f6',
+    'accent': '#1d3c9e',
     'darkBackground': '#0a0f1a',
     'darkSurface': '#0f172a',
     'darkText': '#f1f5f9',
     'darkTextSecondary': '#94a3b8',
-    'lightBackground': '#F7E7CE',
-    'lightSurface': '#FEF9F0',
-    'lightText': '#1F1A12',
-    'lightTextSecondary': '#7D6B48',
-    'success': '#22c55e',
-    'warning': '#f59e0b',
-    'error': '#ef4444',
+    'lightBackground': '#f4f4ef',
+    'lightSurface': '#fdfdfb',
+    'lightText': '#23252b',
+    'lightTextSecondary': '#5d606a',
+    'success': '#1f7a43',
+    'warning': '#c27c0e',
+    'error': '#b3261e',
 }
 
 
@@ -549,7 +549,7 @@ def _manifest_base_path(base: str | None) -> str:
 async def _resolve_manifest_colors(db: AsyncSession) -> tuple[str, str]:
     """(фон, акцент) для манифеста и иконок из цветов темы кабинета.
 
-    Фон — тёмной темы, если она включена (как по умолчанию у кабинета), иначе светлой.
+    Фон — тёмной темы, если она включена, иначе светлой (по умолчанию кабинет только светлый).
     """
     colors = dict(DEFAULT_THEME_COLORS)
     colors_json = await get_setting_value(db, THEME_COLORS_KEY)
@@ -1026,7 +1026,7 @@ async def reset_theme_colors(
 
 # ============ Enabled Themes Routes ============
 
-DEFAULT_ENABLED_THEMES = {'dark': True, 'light': True}
+DEFAULT_ENABLED_THEMES = {'dark': False, 'light': True}
 
 
 @router.get('/themes', response_model=EnabledThemesResponse)

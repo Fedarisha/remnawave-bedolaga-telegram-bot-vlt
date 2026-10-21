@@ -66,7 +66,7 @@ async def test_manifest_uses_branding_name_and_theme_colors(monkeypatch) -> None
     monkeypatch.setattr(branding_routes, 'get_logo_path', lambda: None)
     values = {
         branding_routes.BRANDING_NAME_KEY: '  ZeroPing  ',
-        branding_routes.THEME_COLORS_KEY: json.dumps({'darkBackground': '#101820', 'accent': '#ff5500'}),
+        branding_routes.THEME_COLORS_KEY: json.dumps({'lightBackground': '#101820', 'accent': '#ff5500'}),
     }
 
     manifest = await _manifest(values)
@@ -128,7 +128,7 @@ async def test_broken_stored_colors_fall_back_to_defaults(monkeypatch) -> None:
 
     manifest = await _manifest(values)
 
-    assert manifest['background_color'] == branding_routes.DEFAULT_THEME_COLORS['darkBackground']
+    assert manifest['background_color'] == branding_routes.DEFAULT_THEME_COLORS['lightBackground']
 
 
 async def test_empty_name_uses_build_default(monkeypatch) -> None:
@@ -202,7 +202,7 @@ async def test_logo_icon_is_an_opaque_square_of_the_exact_size(
     logo = tmp_path / 'logo.png'
     _write_glyph_logo(logo, size=(200, 100))
     monkeypatch.setattr(branding_routes, 'get_logo_path', lambda: logo)
-    values = {branding_routes.THEME_COLORS_KEY: json.dumps({'darkBackground': '#102030'})}
+    values = {branding_routes.THEME_COLORS_KEY: json.dumps({'lightBackground': '#102030'})}
 
     image = (await _icon(values, size, maskable=maskable)).convert('RGBA')
 
@@ -264,7 +264,7 @@ async def test_logo_with_a_varied_edge_keeps_the_theme_background(tmp_path: Path
     logo = tmp_path / 'logo.png'
     logo_image.save(logo)
     monkeypatch.setattr(branding_routes, 'get_logo_path', lambda: logo)
-    values = {branding_routes.THEME_COLORS_KEY: json.dumps({'darkBackground': '#102030'})}
+    values = {branding_routes.THEME_COLORS_KEY: json.dumps({'lightBackground': '#102030'})}
 
     image = (await _icon(values, 512, maskable=True)).convert('RGB')
 
