@@ -229,6 +229,20 @@ def _tail_confirms_own_expiry(
     return panel_datetime_to_utc(subscription.end_date) <= now
 
 
+def _is_suspended_daily(subscription) -> bool:
+    """Суточная подписка, которую DailySubscriptionService приостановил (DISABLED).
+
+    Тариф смотрим, только если он уже загружен (ленивая подгрузка в async-сессии
+    падает); иначе признак суточной — след списаний ``last_daily_charge_at``.
+    """
+    if subscription.status != SubscriptionStatus.DISABLED.value:
+        return False
+    tariff = getattr(subscription, '__dict__', {}).get('tariff')
+    if tariff is not None:
+        return bool(getattr(tariff, 'is_daily', False))
+    return getattr(subscription, 'last_daily_charge_at', None) is not None
+
+
 def _next_status_from_webhook(subscription, snapshot: PanelSnapshot, *, now: datetime) -> str:
     """Статус по событию панели.
 
@@ -453,6 +467,12 @@ def project_onto_subscription(
         # по нему. Иначе оплаченная подписка на всё окно удержания показывалась
         # истёкшей и попадала в кандидаты грейса. DISABLED и LIMITED — настоящие
         # действия (админ, трафик) и по-прежнему принимаются.
+        new_status = subscription.status
+    if new_status == SubscriptionStatus.EXPIRED.value and _is_suspended_daily(subscription):
+        # Форк: приостановленную из-за баланса суточную подписку ведёт
+        # DailySubscriptionService и возобновляет DISABLED после пополнения. Панель
+        # гасит такой аккаунт до EXPIRED по прошедшей дате; принять это значит
+        # навсегда выключить авто-возобновление.
         new_status = subscription.status
     if new_status != subscription.status:
         subscription.status = new_status
