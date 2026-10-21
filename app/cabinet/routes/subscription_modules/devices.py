@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.cabinet.routes.subscription_modules.helpers import ensure_subscription_has_tariff
 from app.cabinet.utils.device_ownership import verify_hwid_belongs_to_user
 from app.config import settings
 from app.database.crud.tariff import get_tariff_by_id
@@ -34,6 +35,7 @@ from app.database.crud.user_device_alias import (
     set_alias,
 )
 from app.database.models import Subscription, TransactionType, User
+from app.services.panel_sync import should_create_panel_account
 from app.services.subscription_service import SubscriptionService
 from app.services.user_cart_service import user_cart_service
 
@@ -63,7 +65,9 @@ def _resolve_panel_user_id(subscription: Subscription | None, user: User) -> int
     """
     if settings.is_multi_tariff_enabled() and subscription is not None:
         return subscription.remnawave_id
-    return user.remnawave_id
+    # Одиночный режим: аккаунт мог быть создан в мультитарифе и записан только у
+    # подписки — иначе после возврата оператора в одиночный режим «0 устройств».
+    return user.remnawave_id or (subscription.remnawave_id if subscription is not None else None)
 
 
 @router.post('/devices')
@@ -86,6 +90,7 @@ async def purchase_devices_legacy(
 
     # Resolve subscription (ownership validated), then lock the row for concurrent safety
     resolved = await resolve_subscription(db, user, subscription_id)
+    ensure_subscription_has_tariff(resolved)
     if not resolved:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='No subscription found')
 
@@ -189,6 +194,9 @@ async def purchase_devices_legacy(
         try:
             cart_data = {
                 'cart_mode': 'add_devices',
+                # Намерение пополнить ради этой корзины: без него тихая автопокупка после
+                # пополнения пропускает корзину, а кнопка «вернуться» её не знает.
+                'return_to_cart': True,
                 'devices_to_add': request.devices,
                 'price_kopeks': total_price,
                 'base_price_kopeks': base_total_price,
@@ -276,10 +284,7 @@ async def purchase_devices_legacy(
     # already committed, defer slow syncs to remnawave_retry_queue).
     try:
         service = SubscriptionService()
-        if settings.is_multi_tariff_enabled():
-            _should_create = not subscription.remnawave_id
-        else:
-            _should_create = not getattr(user, 'remnawave_id', None)
+        _should_create = await should_create_panel_account(db, subscription, user)
 
         async with asyncio.timeout(REMNAWAVE_SYNC_TIMEOUT):
             if _should_create:
@@ -351,6 +356,7 @@ async def purchase_devices(
     try:
         # Resolve subscription (ownership validated), then lock the row for concurrent safety
         resolved = await resolve_subscription(db, user, subscription_id)
+        ensure_subscription_has_tariff(resolved)
         if not resolved:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='У вас нет активной подписки')
 
@@ -464,6 +470,9 @@ async def purchase_devices(
             try:
                 cart_data = {
                     'cart_mode': 'add_devices',
+                    # Намерение пополнить ради этой корзины: без него тихая автопокупка после
+                    # пополнения пропускает корзину, а кнопка «вернуться» её не знает.
+                    'return_to_cart': True,
                     'devices_to_add': request.devices,
                     'price_kopeks': price_kopeks,
                     'base_price_kopeks': base_price_prorated,
@@ -551,10 +560,7 @@ async def purchase_devices(
         # already committed, defer slow syncs to remnawave_retry_queue).
         service = SubscriptionService()
         try:
-            if settings.is_multi_tariff_enabled():
-                _should_create = not subscription.remnawave_id
-            else:
-                _should_create = not getattr(user, 'remnawave_id', None)
+            _should_create = await should_create_panel_account(db, subscription, user)
 
             async with asyncio.timeout(REMNAWAVE_SYNC_TIMEOUT):
                 if _should_create:
@@ -660,6 +666,7 @@ async def save_devices_cart(
 ) -> dict[str, bool]:
     """Save cart for device purchase (for insufficient balance flow)."""
     subscription = await resolve_subscription(db, user, subscription_id)
+    ensure_subscription_has_tariff(subscription)
 
     if not subscription:
         raise HTTPException(
@@ -746,6 +753,9 @@ async def save_devices_cart(
     # Save cart for auto-purchase after balance top-up
     cart_data = {
         'cart_mode': 'add_devices',
+        # Намерение пополнить ради этой корзины: без него тихая автопокупка после
+        # пополнения пропускает корзину, а кнопка «вернуться» её не знает.
+        'return_to_cart': True,
         'devices_to_add': request.devices,
         'price_kopeks': price_kopeks,
         'base_price_kopeks': base_total_price,
@@ -760,6 +770,8 @@ async def save_devices_cart(
     return {'success': True, 'cart_saved': True}
 
 
+# Отказы обоих эндпоинтов несут ``reason_code`` — кабинет переводит его сам; ``reason``
+# остаётся текстом для кабинетов, которые кода ещё не знают (тест-сторож в tests/cabinet).
 @router.get('/devices/price')
 async def get_device_price(
     devices: int = 1,
@@ -769,11 +781,13 @@ async def get_device_price(
 ):
     """Get price for additional devices."""
     subscription = await resolve_subscription(db, user, subscription_id)
+    ensure_subscription_has_tariff(subscription)
 
     if not subscription or subscription.status not in ['active', 'trial']:
         return {
             'available': False,
             'reason': 'Нет активной подписки',
+            'reason_code': 'no_active_subscription',
         }
 
     tariff = None
@@ -795,6 +809,7 @@ async def get_device_price(
         return {
             'available': False,
             'reason': 'Докупка устройств недоступна',
+            'reason_code': 'devices_unavailable',
         }
 
     # Check max device limit
@@ -805,6 +820,7 @@ async def get_device_price(
         return {
             'available': False,
             'reason': f'Достигнут максимум устройств ({max_device_limit})',
+            'reason_code': 'max_devices_reached',
             'current_device_limit': current_devices,
             'max_device_limit': max_device_limit,
         }
@@ -813,6 +829,7 @@ async def get_device_price(
         return {
             'available': False,
             'reason': f'Можно добавить максимум {can_add} устройств',
+            'reason_code': 'can_add_limited',
             'current_device_limit': current_devices,
             'max_device_limit': max_device_limit,
             'can_add': can_add,
@@ -1178,6 +1195,7 @@ async def get_device_reduction_info(
         return {
             'available': False,
             'reason': 'No subscription found',
+            'reason_code': 'no_subscription',
             'current_device_limit': 0,
             'min_device_limit': 1,
             'can_reduce': 0,
@@ -1189,6 +1207,7 @@ async def get_device_reduction_info(
         return {
             'available': False,
             'reason': 'Device reduction is not available for trial subscriptions',
+            'reason_code': 'trial',
             'current_device_limit': subscription.device_limit or 1,
             'min_device_limit': 1,
             'can_reduce': 0,
@@ -1216,6 +1235,7 @@ async def get_device_reduction_info(
         return {
             'available': False,
             'reason': 'Already at minimum device limit',
+            'reason_code': 'at_minimum',
             'current_device_limit': current_device_limit,
             'min_device_limit': min_device_limit,
             'can_reduce': 0,

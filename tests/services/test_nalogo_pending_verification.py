@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import app.services.nalogo_receipt_delivery as delivery_module
-import app.services.nalogo_service as nalogo_module
 from app.services.nalogo_service import NALOGO_PENDING_VERIFICATION_KEY, NaloGoService
 
 
@@ -69,7 +68,7 @@ def _pending(**overrides) -> dict:
 async def test_pending_verification_entry_keeps_delivery_contact(monkeypatch):
     """Контакт покупателя обязан лечь в очередь — иначе при пересылке его нет."""
     cache = _FakeCache()
-    monkeypatch.setattr(nalogo_module, 'cache', cache)
+    monkeypatch.setattr('app.services.nalogo_service.cache', cache)
 
     await _service()._save_pending_verification(
         name='Оплата подписки',
@@ -92,7 +91,7 @@ async def test_pending_verification_entry_keeps_delivery_contact(monkeypatch):
 async def test_retry_delivers_receipt_to_the_buyer(monkeypatch):
     """Чек, созданный ручной пересылкой, доставляется покупателю."""
     cache = _FakeCache({NALOGO_PENDING_VERIFICATION_KEY: [_pending()]})
-    monkeypatch.setattr(nalogo_module, 'cache', cache)
+    monkeypatch.setattr('app.services.nalogo_service.cache', cache)
     notify = AsyncMock()
     monkeypatch.setattr(delivery_module, 'deliver_nalogo_receipt', notify)
     service = _service()
@@ -114,7 +113,7 @@ async def test_retry_delivers_receipt_to_the_buyer(monkeypatch):
 async def test_retry_delivers_legacy_entry_without_amount_kopeks(monkeypatch):
     """Старые записи очереди без amount_kopeks всё равно доставляются покупателю."""
     cache = _FakeCache({NALOGO_PENDING_VERIFICATION_KEY: [_pending(amount_kopeks=None)]})
-    monkeypatch.setattr(nalogo_module, 'cache', cache)
+    monkeypatch.setattr('app.services.nalogo_service.cache', cache)
     notify = AsyncMock()
     monkeypatch.setattr(delivery_module, 'deliver_nalogo_receipt', notify)
     service = _service()
@@ -133,7 +132,7 @@ async def test_retry_keeps_receipt_when_delivery_fails(monkeypatch):
     же платёж.
     """
     cache = _FakeCache({NALOGO_PENDING_VERIFICATION_KEY: [_pending()]})
-    monkeypatch.setattr(nalogo_module, 'cache', cache)
+    monkeypatch.setattr('app.services.nalogo_service.cache', cache)
     monkeypatch.setattr(
         delivery_module,
         'deliver_nalogo_receipt',
@@ -149,7 +148,7 @@ async def test_retry_keeps_receipt_when_delivery_fails(monkeypatch):
 async def test_retry_without_bot_still_delivers_receipt(monkeypatch):
     """Без bot чек создаётся и всё равно доставляется — доставка поднимет бота сама."""
     cache = _FakeCache({NALOGO_PENDING_VERIFICATION_KEY: [_pending()]})
-    monkeypatch.setattr(nalogo_module, 'cache', cache)
+    monkeypatch.setattr('app.services.nalogo_service.cache', cache)
     notify = AsyncMock()
     monkeypatch.setattr(delivery_module, 'deliver_nalogo_receipt', notify)
     service = _service()

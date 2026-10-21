@@ -536,7 +536,7 @@ class LavaPaymentMixin:
             except Exception as error:
                 logger.error('Ошибка отправки админ уведомления Lava', error=error)
 
-        if getattr(self, 'bot', None) and user.telegram_id:
+        if getattr(self, 'bot', None) and user.telegram_id and settings.is_notifications_enabled():
             try:
                 keyboard = await self.build_topup_success_keyboard(user)
                 await self.bot.send_message(
@@ -651,6 +651,9 @@ class LavaPaymentMixin:
         Никогда не бросает наружу — вебхук обязан завершиться 200 независимо
         от доставки сообщения (зеркало ``_notify_sbp_recurring`` у Platega).
         """
+        if not settings.is_notifications_enabled():
+            return
+
         try:
             from app.cabinet.routes.websocket import cabinet_ws_manager
 
@@ -856,9 +859,11 @@ class LavaPaymentMixin:
         subscription.autopay_enabled = False
         await db.commit()
 
+        from app.services.cashera_recurring_cancel import cancel_cashera_recurring_for_subscription_safe
         from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
 
         await cancel_platega_recurring_for_subscription_safe(db, subscription.id)
+        await cancel_cashera_recurring_for_subscription_safe(db, subscription.id)
 
         return {
             'local_id': record.id,
@@ -1058,11 +1063,18 @@ class LavaPaymentMixin:
             # Лок строки подписки: продление — read-modify-write ``end_date``,
             # и конкурентное продление (ручное/другой коллбек) без него теряло
             # бы одно из двух.
-            from app.database.crud.subscription import _lock_subscription_row
+            from app.database.crud.subscription import _lock_subscription_row, reconcile_tariff_traffic_limit
 
             await _lock_subscription_row(db, subscription)
+            # Оверлей грейса, осевший в подписке, — не её срок: иначе новый период
+            # отсчитывался бы от конца грейса.
+            from app.services.grace_access_echo import undo_grace_overlay_echo
+
+            await undo_grace_overlay_echo(db, subscription)
 
             subscription.extend_subscription(record.charge_days)
+            # Условия тарифа на новый период: база тарифа + активные докупки.
+            await reconcile_tariff_traffic_limit(db, subscription)
 
             # Списание по локально ОТМЕНЁННОЙ записи = удалённая отмена не
             # прошла. Деньги взяты — продлеваем честно, но запись НЕ воскрешаем

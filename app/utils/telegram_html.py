@@ -20,6 +20,9 @@ _TAG_RE = re.compile(r'<(/?)(\w[\w-]*)(?:\s+[^>]*)?>')
 
 _INCOMPLETE_ENTITY_RE = re.compile(r'&[#\w]{0,9}$')
 
+# Пара тегов без видимого текста внутри; пробелы и переводы строк сохраняются.
+_EMPTY_PAIR_RE = re.compile(r'<(b|i|u|s|code|pre|blockquote|a)(?:\s[^>]*)?>(\s*)</\1>')
+
 _MAX_HREF_LENGTH = 1024
 
 _TELEGRAM_HARD_LIMIT = 4096
@@ -122,6 +125,13 @@ class _TelegramHtmlRenderer(HTMLParser):
         while self._open_tags:
             self._parts.append(f'</{self._open_tags.pop()}>')
         text = ''.join(self._parts)
+        # Пустой заголовок или абзац из редактора давал «<b></b>»: строка не пустая,
+        # но видимого текста нет — Telegram такое сообщение не примет, а проверки
+        # «текст пустой → взять текст по умолчанию» его пропускали.
+        previous = None
+        while previous != text:
+            previous = text
+            text = _EMPTY_PAIR_RE.sub(r'\2', text)
         text = re.sub(r'[ \t]+\n', '\n', text)
         text = re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
@@ -155,6 +165,21 @@ def info_page_faq_to_telegram(raw_content: str | None) -> str:
         if block:
             blocks.append(block)
     return '\n\n'.join(blocks)
+
+
+def stored_html_to_telegram_pages(raw_content: str | None, *, max_length: int = 3500) -> list[str]:
+    """Сохранённый HTML страницы → куски, которые Telegram согласится разобрать.
+
+    Тексты правил, политики, оферты и FAQ редактируются как HTML, и никто не
+    ограничивает автора набором из восьми тегов, которые понимает Telegram.
+    Один <p> из вставленной вёрстки — и отправка падает с «Unsupported start
+    tag», то есть раздел перестаёт открываться целиком.
+
+    Порядок важен: сначала преобразование, потом нарезка. Резать исходный HTML
+    по длине означало бы считать длину по разметке, которой в сообщении уже не
+    будет, и рвать теги посередине.
+    """
+    return split_telegram_text(html_to_telegram(raw_content), max_length=max_length)
 
 
 def _scan_open_tags(chunk: str, carried: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -195,6 +220,15 @@ def _trim_broken_tag(chunk: str) -> str:
     if match:
         chunk = chunk[: match.start()]
     return chunk
+
+
+def trim_broken_markup(chunk: str) -> str:
+    """Обрезает незакрытый тег или неполную HTML-сущность в конце куска.
+
+    Нужна всем, кто режет уже экранированный текст по длине: обрыв внутри
+    `&quot;` ломает разбор HTML на стороне Telegram.
+    """
+    return _trim_broken_tag(chunk)
 
 
 def split_telegram_text(text: str | None, *, max_length: int = 3500) -> list[str]:

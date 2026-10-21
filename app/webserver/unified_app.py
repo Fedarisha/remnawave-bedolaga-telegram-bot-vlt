@@ -185,6 +185,12 @@ def create_unified_app(
     if payments_router:
         app.include_router(payments_router)
 
+        # ПЕРВЫМ в порядке shutdown: часть платёжных вебхуков отвечает 200 сразу
+        # и дорабатывает в фоне, а провайдер после 200 коллбек не повторит. Дренаж
+        # обязан отработать, пока живы и telegram-процессор (фон шлёт уведомление
+        # о зачислении), и пул БД — то есть до всех остановок ниже.
+        shutdown_handlers.append(payments.drain_webhook_bg_tasks)
+
     # Mount RemnaWave incoming webhook router
     remnawave_webhook_enabled = settings.is_remnawave_webhook_enabled()
     if remnawave_webhook_enabled:
@@ -203,6 +209,13 @@ def create_unified_app(
         # ПЕРВЫМ в shutdown_handlers — итерация без reverse.
         shutdown_handlers.append(remnawave_webhook_service.stop)
 
+    # DPI//CHECKER: события проверок и мониторов из кабинета (подпись — секретом сервиса).
+    # Подключён всегда: модуль включают из кабинета без перезапуска, выключенный отвечает 503.
+    from app.services.dpichecker.service import dpichecker_service
+    from app.webserver.dpichecker_webhook import create_dpichecker_webhook_router
+
+    app.include_router(create_dpichecker_webhook_router(dpichecker_service))
+
     payment_providers_state = {
         'tribute': settings.TRIBUTE_ENABLED,
         'mulenpay': settings.is_mulenpay_enabled(),
@@ -215,6 +228,15 @@ def create_unified_app(
         'freekassa': settings.is_freekassa_enabled(),
         'riopay': settings.is_riopay_enabled(),
     }
+
+    # Маршруты вебхуков фиксируются на старте по учётным данным, а флаги
+    # включения переключают в рантайме. Провайдер, включённый уже после
+    # запуска и без кредов в конфиге, принимает оплату, но его коллбек падает
+    # в 404 — и увидеть это неоткуда, запрос до бота не доходит. Поэтому
+    # список смонтированных путей отдаётся в health рядом с флагами.
+    payment_webhook_paths = sorted(
+        {route.path for route in getattr(payments_router, 'routes', []) if getattr(route, 'path', None)}
+    )
 
     if enable_telegram_webhook:
         telegram_processor = telegram.TelegramWebhookProcessor(
@@ -276,6 +298,7 @@ def create_unified_app(
         payment_state = {
             'enabled': bool(payments_router),
             'providers': payment_providers_state,
+            'mounted_paths': payment_webhook_paths,
         }
 
         miniapp_state = {

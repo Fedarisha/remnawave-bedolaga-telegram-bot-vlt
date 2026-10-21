@@ -234,7 +234,7 @@ def test_calculate_daily_price_handles_exceptions(monkeypatch: pytest.MonkeyPatc
         id = 123
 
         def get_primary_promo_group(self):
-            raise RuntimeError("Lazy load failed or MissingGreenlet")
+            raise RuntimeError('Lazy load failed or MissingGreenlet')
 
     price = DailySubscriptionService._calculate_daily_price(FlakyUser(), tariff)
     assert price == 1200

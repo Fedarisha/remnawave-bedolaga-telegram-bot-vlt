@@ -36,7 +36,7 @@ def test_is_secret_key_matches_secret_names(key: str) -> None:
     'key',
     [
         'CHANNEL_LINK',
-        'SUPPORT_USERNAME',
+        'SUPPORT_TG_USERNAME',
         'TRIAL_DURATION_DAYS',
         'DEFAULT_LANGUAGE',
     ],

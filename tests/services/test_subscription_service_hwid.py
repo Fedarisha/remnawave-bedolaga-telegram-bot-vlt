@@ -56,6 +56,7 @@ async def test_multi_create_or_update_existing_user_preserves_hwid_devices() -> 
         get_user_by_uuid=AsyncMock(return_value=existing),
         get_user_by_id=AsyncMock(return_value=existing),
         update_user=AsyncMock(return_value=existing),
+        create_user=AsyncMock(),
         reset_user_devices=AsyncMock(),
     )
 
@@ -85,6 +86,7 @@ async def test_single_create_or_update_existing_user_preserves_hwid_devices() ->
         get_user_by_telegram_id=AsyncMock(return_value=[]),
         get_user_by_email=AsyncMock(return_value=[]),
         update_user=AsyncMock(return_value=existing),
+        create_user=AsyncMock(),
         reset_user_devices=AsyncMock(),
     )
 

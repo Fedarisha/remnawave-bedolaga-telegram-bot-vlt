@@ -11,6 +11,9 @@ class _ScalarResult:
     def scalar(self):
         return self._value
 
+    def one(self):
+        return (self._value, 0)
+
 
 async def test_referral_info_backfills_missing_referral_code(monkeypatch):
     user = SimpleNamespace(
@@ -21,13 +24,7 @@ async def test_referral_info_backfills_missing_referral_code(monkeypatch):
     )
     db = SimpleNamespace(
         execute=AsyncMock(
-            side_effect=[
-                _ScalarResult(0),
-                _ScalarResult(0),
-                _ScalarResult(0),
-                _ScalarResult(0),
-                _ScalarResult(0),
-            ]
+            side_effect=[_ScalarResult(0) for _ in range(10)]
         ),
         commit=AsyncMock(),
         refresh=AsyncMock(),

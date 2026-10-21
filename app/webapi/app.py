@@ -12,7 +12,7 @@ from app.cabinet.routes.info import public_router as public_info_router
 from app.config import settings
 from app.webapi.docs import add_redoc_endpoint
 
-from .middleware import RequestLoggingMiddleware
+from .middleware import RequestLoggingMiddleware, RequestPathContextMiddleware
 from .routes import (
     backups,
     ban_notifications,
@@ -220,6 +220,9 @@ def create_web_api_app(lifespan: Any = None) -> FastAPI:
 
     if settings.WEB_API_REQUEST_LOGGING:
         app.add_middleware(RequestLoggingMiddleware)
+
+    # Всегда: путь запроса нужен логу действий пользователя (таймлайн активности).
+    app.add_middleware(RequestPathContextMiddleware)
 
     app.include_router(health.router)
     app.include_router(stats.router, prefix='/stats', tags=['stats'])

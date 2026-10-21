@@ -41,10 +41,17 @@ from app.utils.pricing_utils import format_period_description
 from app.utils.promo_offer import (
     build_promo_offer_hint,
     build_test_access_hint,
+    get_user_active_promo_discount_percent,
 )
 from app.utils.rich_menu import try_edit_rich_main_menu
+from app.utils.subscription_time import local_days_until
 from app.utils.subscription_utils import get_cabinet_web_link_block
-from app.utils.telegram_html import html_to_telegram, info_page_faq_to_telegram, split_telegram_text
+from app.utils.telegram_html import (
+    html_to_telegram,
+    info_page_faq_to_telegram,
+    split_telegram_text,
+    stored_html_to_telegram_pages,
+)
 from app.utils.timezone import format_local_datetime
 
 
@@ -170,30 +177,8 @@ def _build_group_discount_lines(group: PromoGroup, texts, language: str) -> list
     return lines
 
 
-async def show_main_menu(
-    callback: types.CallbackQuery,
-    db_user: User,
-    db: AsyncSession,
-    *,
-    skip_callback_answer: bool = False,
-):
-    if db_user is None:
-        # Пользователь не найден, используем язык по умолчанию
-        texts = get_texts(settings.DEFAULT_LANGUAGE)
-        await callback.answer(
-            texts.t(
-                'USER_NOT_FOUND_ERROR',
-                'Ошибка: пользователь не найден.',
-            ),
-            show_alert=True,
-        )
-        return
-
-    texts = get_texts(db_user.language)
-
-    db_user.last_activity = datetime.now(UTC)
-    await db.commit()
-
+async def build_main_menu_keyboard(db_user: User, db: AsyncSession):
+    """Клавиатура главного меню: show_main_menu, handle_back_to_menu и живое меню (live_menu_service)."""
     # Multi-tariff aware: check if user has ANY active subscription
     # 'limited' (traffic exhausted) subscriptions are still active for UI purposes
     _subs = getattr(db_user, 'subscriptions', None) or []
@@ -242,6 +227,34 @@ async def show_main_menu(
         has_saved_cart=has_saved_cart,
         custom_buttons=custom_buttons,
     )
+    return keyboard
+
+
+async def show_main_menu(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    *,
+    skip_callback_answer: bool = False,
+):
+    if db_user is None:
+        # Пользователь не найден, используем язык по умолчанию
+        texts = get_texts(settings.DEFAULT_LANGUAGE)
+        await callback.answer(
+            texts.t(
+                'USER_NOT_FOUND_ERROR',
+                'Ошибка: пользователь не найден.',
+            ),
+            show_alert=True,
+        )
+        return
+
+    texts = get_texts(db_user.language)
+
+    db_user.last_activity = datetime.now(UTC)
+    await db.commit()
+
+    keyboard = await build_main_menu_keyboard(db_user, db)
 
     if not await try_edit_rich_main_menu(callback, db_user, texts, db, keyboard):
         menu_text = await get_main_menu_text(db_user, texts, db)
@@ -310,7 +323,7 @@ async def show_service_rules(callback: types.CallbackQuery, db_user: User, db: A
 
     # Правила могут быть длиннее лимита Telegram (4096) — пагинация как у
     # политики конфиденциальности и оферты
-    pages = split_telegram_text(rules_text, max_length=3500) or ['']
+    pages = stored_html_to_telegram_pages(rules_text, max_length=3500) or ['']
     total_pages = len(pages)
     current_page = min(raw_page, total_pages)
 
@@ -678,7 +691,10 @@ async def show_faq_page(
         )
         return
 
-    content_pages = FaqService.split_content_into_pages(page.content)
+    # Через преобразователь: текст страницы редактируется как произвольный HTML,
+    # а Telegram знает восемь тегов. Один <p> из вставленной вёрстки — и вся
+    # страница перестаёт открываться с «Unsupported start tag».
+    content_pages = stored_html_to_telegram_pages(page.content, max_length=FaqService.MAX_PAGE_LENGTH)
 
     if not content_pages:
         await callback.answer(
@@ -812,7 +828,7 @@ async def show_privacy_policy(
         )
         return
 
-    pages = PrivacyPolicyService.split_content_into_pages(policy.content)
+    pages = stored_html_to_telegram_pages(policy.content, max_length=PrivacyPolicyService.MAX_PAGE_LENGTH)
 
     if not pages:
         await callback.answer(
@@ -936,7 +952,7 @@ async def show_public_offer(
         )
         return
 
-    pages = PublicOfferService.split_content_into_pages(offer.content)
+    pages = stored_html_to_telegram_pages(offer.content, max_length=PublicOfferService.MAX_PAGE_LENGTH)
 
     if not pages:
         await callback.answer(
@@ -1235,54 +1251,7 @@ async def handle_back_to_menu(callback: types.CallbackQuery, state: FSMContext, 
 
     texts = get_texts(db_user.language)
 
-    # Multi-tariff aware: check if user has ANY active subscription
-    # 'limited' (traffic exhausted) subscriptions are still active for UI purposes
-    _subs = getattr(db_user, 'subscriptions', None) or []
-    has_active_subscription = any(sub.is_active or getattr(sub, 'actual_status', None) == 'limited' for sub in _subs)
-    subscription_is_active = has_active_subscription
-
-    draft_exists = await has_subscription_checkout_draft(db_user.id)
-    show_resume_checkout = should_offer_checkout_resume(db_user, draft_exists)
-
-    # Проверяем наличие сохраненной корзины в Redis
-    try:
-        has_saved_cart = await user_cart_service.has_user_cart(db_user.id)
-    except Exception as e:
-        logger.error('Ошибка проверки сохраненной корзины для пользователя', db_user_id=db_user.id, error=e)
-        has_saved_cart = False
-
-    is_admin = settings.is_admin(db_user.telegram_id)
-    is_moderator = (not is_admin) and SupportSettingsService.is_moderator(db_user.telegram_id)
-
-    custom_buttons = []
-    if not settings.is_text_main_menu_mode():
-        custom_buttons = await MainMenuButtonService.get_buttons_for_user(
-            db,
-            is_admin=is_admin,
-            has_active_subscription=has_active_subscription,
-            subscription_is_active=subscription_is_active,
-        )
-
-    if settings.is_x_ui_migration_enabled():
-        from app.handlers.x_ui_migration import build_entry_button
-
-        custom_buttons.append(build_entry_button(db_user.language))
-
-    keyboard = await get_main_menu_keyboard_async(
-        db=db,
-        user=db_user,
-        language=db_user.language,
-        is_admin=is_admin,
-        is_moderator=is_moderator,
-        has_had_paid_subscription=db_user.has_had_paid_subscription,
-        has_active_subscription=has_active_subscription,
-        subscription_is_active=subscription_is_active,
-        balance_kopeks=db_user.balance_kopeks,
-        subscription=db_user.subscription,  # Uses primary subscription (multi-tariff compatible via property)
-        show_resume_checkout=show_resume_checkout,
-        has_saved_cart=has_saved_cart,
-        custom_buttons=custom_buttons,
-    )
+    keyboard = await build_main_menu_keyboard(db_user, db)
 
     if not await try_edit_rich_main_menu(callback, db_user, texts, db, keyboard):
         menu_text = await get_main_menu_text(db_user, texts, db)
@@ -1304,10 +1273,9 @@ def _get_subscription_status(user: User, texts, is_daily_tariff: bool = False) -
     actual_status = (subscription.actual_status or '').lower()
     end_date = getattr(subscription, 'end_date', None)
     end_date_text = format_local_datetime(end_date, '%d.%m.%Y') if end_date else None
-    days_left = 0
-
-    if subscription.end_date > current_time:
-        days_left = (subscription.end_date - current_time).days
+    # Календарные дни в зоне оператора: «завтра» = дата окончания завтра,
+    # а не «осталось меньше двух суток» (целая часть суток давала «завтра» при 1 д 23 ч).
+    days_left = local_days_until(subscription.end_date, current_time)
 
     if actual_status == 'pending':
         return texts.t('SUBSCRIPTION_NONE', '❌ Нет активной подписки')
@@ -1426,7 +1394,7 @@ async def _get_multi_tariff_status(user, texts, db: AsyncSession) -> tuple[str, 
         elif actual == 'limited':
             status_suffix = ' — лимит трафика'
         elif sub.end_date and sub.end_date > current_time:
-            days_left = (sub.end_date - current_time).days
+            days_left = local_days_until(sub.end_date, current_time)
             end_str = format_local_datetime(sub.end_date, '%d.%m.%Y')
             status_suffix = f' — до {end_str} ({days_left} дн.)'
         else:
