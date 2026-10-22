@@ -3461,15 +3461,13 @@ async def get_subscription_details(
             is_daily_paused = getattr(subscription, 'is_daily_paused', False)
             daily_tariff_name = tariff.name
             daily_price_kopeks = getattr(tariff, 'daily_price_kopeks', 0)
-            # Применяем скидку промогруппы + promo-offer для отображения
+            # Цена за сутки с докупленными устройствами и скидками группы — как списывает
+            # планировщик; promo-offer поверх, как раньше показывалось здесь.
             if daily_price_kopeks > 0:
-                _promo_group = user.get_primary_promo_group() if hasattr(user, 'get_primary_promo_group') else None
-                _group_pct = _promo_group.get_discount_percent('period', 1) if _promo_group else 0
+                daily_price_kopeks = PricingEngine.daily_charge_price(tariff, subscription.device_limit, user)
                 _offer_pct = get_user_active_promo_discount_percent(user) if user else 0
-                if _group_pct > 0 or _offer_pct > 0:
-                    daily_price_kopeks, _, _ = PricingEngine.apply_stacked_discounts(
-                        daily_price_kopeks, _group_pct, _offer_pct
-                    )
+                if _offer_pct > 0:
+                    daily_price_kopeks = PricingEngine.apply_discount(daily_price_kopeks, _offer_pct)
             daily_price_label = settings.format_price(daily_price_kopeks) + '/день' if daily_price_kopeks > 0 else None
             # Оставшееся время подписки (показываем даже при паузе)
             if subscription.end_date:

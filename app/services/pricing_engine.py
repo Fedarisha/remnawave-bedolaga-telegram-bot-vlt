@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -138,6 +139,37 @@ class PricingEngine:
         if group_pct <= 0:
             return daily_price_kopeks, 0
         return PricingEngine.apply_discount(daily_price_kopeks, group_pct), group_pct
+
+    @staticmethod
+    def daily_extra_devices_price(tariff: Tariff, device_limit: int | None) -> int:
+        """Доплата за докупленные сверх тарифа устройства за одни сутки, без скидок.
+
+        Цена устройства у тарифа месячная, сутки — её тридцатая часть (вверх до копейки):
+        50 ₽ в месяц → 1,67 ₽ в сутки. Ровно столько докупка берёт за остаток суток, и
+        столько же должно списываться каждый следующий день: раньше суточное списание
+        брало только цену тарифа, и докупленное устройство после первых суток было бесплатным.
+        """
+        unit = tariff.device_price_kopeks if tariff.device_price_kopeks is not None else settings.PRICE_PER_DEVICE
+        extra = max(0, (device_limit or 0) - (tariff.device_limit or 0))
+        if extra <= 0 or not unit or unit <= 0:
+            return 0
+        return math.ceil(extra * unit / 30)
+
+    @staticmethod
+    def daily_charge_price(tariff: Tariff, device_limit: int | None, user: User | None) -> int:
+        """Сколько суточная подписка стоит за одни сутки: тариф + докупленные устройства.
+
+        Скидки — только промогруппы (как в daily_group_price): «period» на тариф,
+        «devices» на устройства. Это и списывается каждый день, и показывается как цена за день.
+        """
+        base, _ = PricingEngine.daily_group_price(int(tariff.daily_price_kopeks or 0), user)
+        devices = PricingEngine.daily_extra_devices_price(tariff, device_limit)
+        if devices > 0:
+            promo_group = PricingEngine.resolve_promo_group(user)
+            devices_pct = promo_group.get_discount_percent('devices', 1) if promo_group else 0
+            if devices_pct > 0:
+                devices = PricingEngine.apply_discount(devices, devices_pct)
+        return max(0, base) + devices
 
     @staticmethod
     def resolve_promo_group(user: User | None):
@@ -591,9 +623,12 @@ class PricingEngine:
         months = calculate_months_from_days(period_days)
 
         # --- Base price ---
-        is_daily = getattr(tariff, 'is_daily', False)
-        if is_daily and period_days <= 1:
-            base_price = int(getattr(tariff, 'daily_price_kopeks', 0) or 0)
+        # Суточный тариф живёт сутками: N дней стоят ровно N суточных списаний (тариф и
+        # докупленные устройства). У него нет цен по периодам, и раньше продление «на 30
+        # дней» брало 0 ₽ за тариф плюс устройства — месяц за 100 ₽ вместо 360 ₽.
+        is_daily = getattr(tariff, 'is_daily', False) is True
+        if is_daily:
+            base_price = int(getattr(tariff, 'daily_price_kopeks', 0) or 0) * period_days
         else:
             period_prices: dict = tariff.period_prices or {}
             base_price = int(period_prices.get(str(period_days), 0) or 0)
@@ -609,8 +644,8 @@ class PricingEngine:
         )
         tariff_device_limit = tariff.device_limit or 0
         extra_devices = max(0, (device_limit or 0) - tariff_device_limit)
-        if is_daily and period_days <= 1:
-            devices_price = extra_devices * device_price_per_unit
+        if is_daily:
+            devices_price = self.daily_extra_devices_price(tariff, device_limit) * period_days
         else:
             devices_price = extra_devices * device_price_per_unit * months
 
@@ -629,8 +664,11 @@ class PricingEngine:
         if promo_group is not None and not tariff.is_available_for_promo_group(promo_group.id):
             promo_group = None
         if promo_group is not None:
-            period_pct = promo_group.get_discount_percent('period', period_days)
-            devices_pct = promo_group.get_discount_percent('devices', period_days)
+            # Суточному — скидки за сутки, как у ежедневного списания: иначе оплата N дней
+            # разом выходила бы дешевле тех же N суточных списаний.
+            discount_days = 1 if is_daily else period_days
+            period_pct = promo_group.get_discount_percent('period', discount_days)
+            devices_pct = promo_group.get_discount_percent('devices', discount_days)
 
         offer_pct = get_user_active_promo_discount_percent(user) if user else 0
 

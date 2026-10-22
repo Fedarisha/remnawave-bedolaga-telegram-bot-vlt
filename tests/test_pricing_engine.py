@@ -1007,3 +1007,54 @@ class TestOriginalPriceIdentity:
         with patch('app.services.pricing_engine.get_user_active_promo_discount_percent', return_value=5):
             result = await engine.calculate_renewal_price(db, sub, 30, user=user)
         assert result.original_total == 20000  # undiscounted subtotal
+
+
+class TestDailyTariffPricing:
+    """Суточный тариф: N дней = N суточных списаний, докупленное устройство — месячная цена / 30 в сутки."""
+
+    @staticmethod
+    def _daily_subscription(device_limit: int):
+        tariff = MagicMock()
+        tariff.id = 2
+        tariff.is_daily = True
+        tariff.daily_price_kopeks = 1200
+        tariff.period_prices = {}
+        tariff.device_limit = 1
+        tariff.device_price_kopeks = 5000
+        tariff.is_available_for_promo_group.return_value = True
+        subscription = MagicMock()
+        subscription.tariff_id = 2
+        subscription.tariff = tariff
+        subscription.device_limit = device_limit
+        user = MagicMock()
+        user.promo_group = None
+        user.get_primary_promo_group.return_value = None
+        return subscription, user
+
+    def test_extra_devices_cost_a_thirtieth_of_the_monthly_price_per_day(self):
+        subscription, _ = self._daily_subscription(device_limit=3)
+        # 2 устройства × 50 ₽ / 30 = 3,33… ₽ → вверх до копейки
+        assert PricingEngine.daily_extra_devices_price(subscription.tariff, 3) == 334
+        assert PricingEngine.daily_extra_devices_price(subscription.tariff, 1) == 0
+
+    def test_daily_charge_includes_extra_devices(self):
+        subscription, user = self._daily_subscription(device_limit=3)
+        assert PricingEngine.daily_charge_price(subscription.tariff, 3, user) == 1200 + 334
+        assert PricingEngine.daily_charge_price(subscription.tariff, 1, user) == 1200
+
+    @pytest.mark.asyncio
+    async def test_thirty_day_renewal_costs_thirty_daily_charges(self):
+        """Раньше: 0 ₽ за тариф + 2 × 50 ₽ за устройства = 100 ₽ за месяц на суточном."""
+        subscription, user = self._daily_subscription(device_limit=3)
+        with patch('app.services.pricing_engine.get_user_active_promo_discount_percent', return_value=0):
+            result = await PricingEngine().calculate_renewal_price(AsyncMock(), subscription, 30, user=user)
+        assert result.base_price == 1200 * 30
+        assert result.devices_price == 334 * 30
+        assert result.final_total == (1200 + 334) * 30
+
+    @pytest.mark.asyncio
+    async def test_one_day_charges_a_day_of_devices_not_a_month(self):
+        subscription, user = self._daily_subscription(device_limit=3)
+        with patch('app.services.pricing_engine.get_user_active_promo_discount_percent', return_value=0):
+            result = await PricingEngine().calculate_renewal_price(AsyncMock(), subscription, 1, user=user)
+        assert result.final_total == 1200 + 334

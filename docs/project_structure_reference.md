@@ -1716,7 +1716,7 @@
   Классы: нет
   Функции: `build_start_keyboard`, `send_poll_to_users`, `reward_user_for_poll`, `get_next_question`, `get_question_option`
 - `app/services/pricing_engine.py` — Python-модуль
-  Классы: `TariffBreakdown`, `ClassicBreakdown`, `RenewalPricing` (1 методов), `TariffSwitchResult` (2 методов), `PricingEngine` (20 методов)
+  Классы: `TariffBreakdown`, `ClassicBreakdown`, `RenewalPricing` (1 методов), `TariffSwitchResult` (2 методов), `PricingEngine` (22 методов)
   Функции: нет
 - `app/services/privacy_policy_service.py` — Python-модуль
   Классы: `PrivacyPolicyService` (9 методов)
@@ -3245,7 +3245,7 @@
   Классы: нет
   Функции: `sandbox`, `test_y_with_crlf_enter_is_accepted`, `test_russian_da_is_accepted`, `test_no_cancels_without_touching_anything`, `test_without_terminal_requires_yes`
 - `tests/test_pricing_engine.py` — Python-модуль
-  Классы: `TestApplyDiscount` (6 методов), `TestStackedDiscounts` (5 методов), `TestPeriodDaysValidation` (3 методов), `TestCalculateServersPrice` (8 методов), `TestCalculateTrafficPrice` (5 методов), `TestCalculateRenewalPriceTariffMode` (7 методов), `TestCalculateRenewalPriceClassicMode` (10 методов), `TestServerPromoGroupFiltering` (2 методов), `TestFromPayloadRoundTrip` (1 методов), `TestFromPayloadLegacyRoundTrip` (1 методов), `TestOriginalPriceIdentity` (3 методов)
+  Классы: `TestApplyDiscount` (6 методов), `TestStackedDiscounts` (5 методов), `TestPeriodDaysValidation` (3 методов), `TestCalculateServersPrice` (8 методов), `TestCalculateTrafficPrice` (5 методов), `TestCalculateRenewalPriceTariffMode` (7 методов), `TestCalculateRenewalPriceClassicMode` (10 методов), `TestServerPromoGroupFiltering` (2 методов), `TestFromPayloadRoundTrip` (1 методов), `TestFromPayloadLegacyRoundTrip` (1 методов), `TestOriginalPriceIdentity` (3 методов), `TestDailyTariffPricing` (5 методов)
   Функции: `test_renewal_pricing_is_frozen`
 - `tests/test_promo_group_base_discounts.py` — Python-модуль
   Классы: нет
@@ -4532,7 +4532,7 @@
   Функции: `test_cabinet_resume_resets_traffic` — Возобновление с оплатой обнуляет счётчик, когда выключатель включён., `test_cabinet_resume_keeps_traffic_when_disabled` — Выключатель выключен — счётчик не трогаем., `test_cabinet_resume_leaves_daily_reset_to_panel` — Панель обнуляет сама раз в сутки — свой сброс не добавляем., `test_cabinet_resume_lifts_panel_limit_after_paid_reset` — Подписка была в лимите трафика: после оплаты со сбросом лимит в панели снимается явно., `test_miniapp_resume_resets_traffic` — Кнопка «возобновить» в Mini App живёт по той же политике, что и планировщик., `test_miniapp_resume_keeps_traffic_when_disabled` — Выключатель выключен — счётчик не трогаем., `test_miniapp_resume_lifts_panel_limit_after_paid_reset` — Подписка была в лимите трафика: после оплаты со сбросом лимит в панели снимается явно.
 - `tests/services/test_daily_subscription_service.py` — Python-модуль
   Классы: `ExplodingSubscription` (5 методов)
-  Функции: `anyio_backend`, `test_process_single_charge_avoids_lazy_relationship_access`, `test_notify_daily_charge_skips_unloaded_tariff_without_lazy_access`, `test_process_single_charge_notifies_once_per_situation`, `test_process_auto_resume_skips_when_insufficient_balance`, `test_calculate_daily_price_handles_exceptions`
+  Функции: `anyio_backend`, `test_process_single_charge_avoids_lazy_relationship_access`, `test_notify_daily_charge_skips_unloaded_tariff_without_lazy_access`, `test_process_single_charge_notifies_once_per_situation`, `test_process_auto_resume_skips_when_insufficient_balance`, `test_calculate_daily_price_handles_exceptions`, `test_calculate_daily_price_charges_for_extra_devices` — Докупленные сверх тарифа устройства списываются каждый день, а не только в день покупки.
 - `tests/services/test_daily_subscription_traffic_reset.py` — Python-модуль
   Классы: нет
   Функции: `test_defers_drop_when_panel_resets_and_user_over_limit` — MONTH + used 130 > нового лимита 100 → понижение ОТКЛАДЫВАЕТСЯ до сброса панели., `test_applies_drop_cleanly_when_user_under_limit` — MONTH + used 40 <= нового лимита 100 → лимит понижается, сброса used нет., `test_no_reset_tariff_resets_used_when_over_limit` — NO_RESET (панель сама не сбрасывает) + used 130 > 100 → лимит вниз + сброс used (clamp)., `test_forces_drop_after_grace_even_if_panel_resets` — MONTH, но докупка просрочена >40д → не ждём вечно: понижаем + добиваем used., `test_traffic_reset_only_loop_runs_processor` — #630055: с ВЫКЛЮЧЕННЫМИ суточными тарифами джоба сброса докупок всё равно

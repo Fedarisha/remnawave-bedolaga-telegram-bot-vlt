@@ -99,21 +99,16 @@ class DailySubscriptionService:
         return user, tariff
 
     @staticmethod
-    def _calculate_daily_price(user: User, tariff: Tariff) -> int:
-        """Рассчитывает суточную стоимость тарифа с учётом скидки промогруппы пользователя."""
+    def _calculate_daily_price(user: User, tariff: Tariff, subscription: Subscription | None = None) -> int:
+        """Суточная стоимость подписки: тариф и докупленные устройства, со скидками промогруппы."""
         raw_daily_price = tariff.daily_price_kopeks
         if raw_daily_price <= 0:
             return 0
+        device_limit = getattr(subscription, 'device_limit', None) if subscription is not None else None
         try:
             from app.services.pricing_engine import PricingEngine
 
-            promo_group = PricingEngine.resolve_promo_group(user)
-            daily_group_pct = promo_group.get_discount_percent('period', 1) if promo_group else 0
-            return (
-                PricingEngine.apply_discount(raw_daily_price, daily_group_pct)
-                if daily_group_pct > 0
-                else raw_daily_price
-            )
+            return PricingEngine.daily_charge_price(tariff, device_limit, user)
         except Exception as e:
             logger.warning('Ошибка расчёта скидки для суточного тарифа', user_id=getattr(user, 'id', None), error=e)
             return raw_daily_price
@@ -207,7 +202,7 @@ class DailySubscriptionService:
 
         user = await lock_user_for_pricing(db, user.id)
 
-        daily_price = self._calculate_daily_price(user, tariff)
+        daily_price = self._calculate_daily_price(user, tariff, subscription)
 
         # Проверяем баланс (при 100% скидке — пропускаем)
         if daily_price > 0 and user.balance_kopeks < daily_price:
@@ -881,7 +876,7 @@ class DailySubscriptionService:
                             if not user or not tariff:
                                 continue
 
-                            daily_price = self._calculate_daily_price(user, tariff)
+                            daily_price = self._calculate_daily_price(user, tariff, subscription)
                             if daily_price > 0 and user.balance_kopeks < daily_price:
                                 # Средств всё ещё недостаточно — подписка остаётся DISABLED.
                                 # НЕ переводим в ACTIVE, чтобы не вызывать flapping и повторные списания/уведомления.
@@ -924,7 +919,7 @@ class DailySubscriptionService:
                             if not user or not tariff:
                                 continue
 
-                            daily_price = self._calculate_daily_price(user, tariff)
+                            daily_price = self._calculate_daily_price(user, tariff, subscription)
                             if daily_price > 0 and user.balance_kopeks < daily_price:
                                 # Средств всё ещё недостаточно — не восстанавливаем
                                 continue

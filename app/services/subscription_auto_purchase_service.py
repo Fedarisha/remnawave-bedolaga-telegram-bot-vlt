@@ -2773,14 +2773,10 @@ async def try_resume_disabled_daily_after_topup(
 
     user = await lock_user_for_pricing(db, user.id)
 
-    # Apply group discount to daily price (consistent with PricingEngine._calculate_switch_to_daily)
+    # Та же цена за сутки, что у планировщика: тариф и докупленные устройства со скидками группы
     from app.services.pricing_engine import PricingEngine
 
-    promo_group = PricingEngine.resolve_promo_group(user)
-    daily_group_pct = promo_group.get_discount_percent('period', 1) if promo_group else 0
-    daily_price = (
-        PricingEngine.apply_discount(raw_daily_price, daily_group_pct) if daily_group_pct > 0 else raw_daily_price
-    )
+    daily_price = PricingEngine.daily_charge_price(tariff, subscription.device_limit, user)
 
     # Check balance (при 100% скидке — пропускаем)
     if daily_price > 0 and user.balance_kopeks < daily_price:

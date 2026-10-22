@@ -240,4 +240,13 @@ def test_calculate_daily_price_handles_exceptions(monkeypatch: pytest.MonkeyPatc
     assert price == 1200
 
 
+def test_calculate_daily_price_charges_for_extra_devices() -> None:
+    """Докупленные сверх тарифа устройства списываются каждый день, а не только в день покупки."""
+    tariff = SimpleNamespace(id=2, daily_price_kopeks=1200, device_limit=1, device_price_kopeks=5000)
+    user = SimpleNamespace(id=327, promo_group=None, get_primary_promo_group=lambda: None)
 
+    with_devices = DailySubscriptionService._calculate_daily_price(user, tariff, SimpleNamespace(device_limit=3))
+    without_devices = DailySubscriptionService._calculate_daily_price(user, tariff, SimpleNamespace(device_limit=1))
+
+    assert with_devices == 1200 + 334
+    assert without_devices == 1200
