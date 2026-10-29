@@ -409,7 +409,14 @@ async def get_purchase_options(
 
             tariff_responses = []
             for tariff in tariffs:
-                tariff_data = await _build_tariff_response(db, tariff, current_tariff_id, language, user, subscription)
+                # Каталог без subscription_id — это покупка НОВОЙ подписки: цена без докупленных
+                # устройств чужой подписки. Доп. устройства считаем только при явном продлении.
+                priced_subscription = subscription
+                if settings.is_multi_tariff_enabled() and not subscription_id:
+                    priced_subscription = None
+                tariff_data = await _build_tariff_response(
+                    db, tariff, current_tariff_id, language, user, priced_subscription
+                )
                 # In multi-tariff mode: mark purchased tariffs so frontend can filter them
                 if settings.is_multi_tariff_enabled() and tariff.id in purchased_tariff_ids:
                     tariff_data['is_purchased'] = True
