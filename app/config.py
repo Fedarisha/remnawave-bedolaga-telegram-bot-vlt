@@ -569,7 +569,7 @@ class Settings(BaseSettings):
     TRAFFIC_SNAPSHOT_TTL_HOURS: int = 24  # TTL для snapshot трафика в Redis (часы)
     # Настройки суточных подписок
     DAILY_SUBSCRIPTIONS_ENABLED: bool = True  # Включить автоматическое списание для суточных тарифов
-    DAILY_SUBSCRIPTIONS_CHECK_INTERVAL_MINUTES: int = 30  # Интервал проверки в минутах
+    DAILY_SUBSCRIPTIONS_CHECK_INTERVAL_MINUTES: int = 3  # Интервал проверки в минутах
 
     AUTOPAY_WARNING_DAYS: str = '3,1'
 
