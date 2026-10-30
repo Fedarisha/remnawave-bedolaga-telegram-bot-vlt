@@ -52,3 +52,15 @@ def test_text_search_never_touches_telegram_id() -> None:
     conditions = _user_search_conditions('john_doe')
     assert len(conditions) == 4
     assert all('telegram_id' not in _sql(c) for c in conditions)
+
+
+def test_search_box_also_matches_subscription_name():
+    from sqlalchemy.dialects import postgresql
+
+    from app.database.crud.user import _users_list_conditions
+
+    conditions = _users_list_conditions(search='Мама')
+    sql = ' '.join(str(c.compile(dialect=postgresql.dialect())) for c in conditions)
+
+    assert 'subscriptions.name' in sql
+    assert 'users.username' in sql

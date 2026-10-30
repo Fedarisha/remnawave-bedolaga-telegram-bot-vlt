@@ -31,7 +31,7 @@ from app.database.models import (
     UserPromoGroup,
     UserStatus,
 )
-from app.utils.text_search import contains_conditions
+from app.utils.text_search import contains_clause, contains_conditions
 from app.utils.timezone import local_day_start
 from app.utils.validators import sanitize_telegram_name
 
@@ -1080,7 +1080,14 @@ def _users_list_conditions(
         )
 
     if search:
-        conditions.append(or_(*_user_search_conditions(search)))
+        # Единая строка поиска ищет и по названию подписки, которое человек задал сам.
+        # Раньше для этого был отдельный ввод; после слияния с апстримом его не стало.
+        by_subscription_name = exists(
+            select(Subscription.id)
+            .where(Subscription.user_id == User.id, contains_clause((Subscription.name,), search))
+            .correlate(User)
+        )
+        conditions.append(or_(*_user_search_conditions(search), by_subscription_name))
 
     if email:
         conditions.append(User.email.ilike(f'%{email}%'))
