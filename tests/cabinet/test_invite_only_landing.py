@@ -114,7 +114,7 @@ async def test_web_gift_claim_denies_missing_user_before_account_mutation() -> N
             )
 
     assert exc_info.value.status_code == 403
-    assert exc_info.value.detail == {'code': 'registration_invite_required'}
+    assert exc_info.value.detail['code'] == 'registration_invite_required'
     create_or_mutate.assert_not_awaited()
     db.flush.assert_not_called()
     assert purchase.user_id is None

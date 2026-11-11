@@ -60,7 +60,10 @@ def raise_for_registration_decision(decision: RegistrationAccessDecision) -> Non
     if decision.reason is RegistrationAccessReason.CHECK_UNAVAILABLE:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={'code': 'registration_check_unavailable'},
+            detail={
+                'code': 'registration_check_unavailable',
+                'message': 'Не удалось проверить приглашение. Попробуйте позже или напишите в поддержку.',
+            },
         )
     if decision.reason is RegistrationAccessReason.BLOCKED:
         raise HTTPException(
@@ -69,7 +72,12 @@ def raise_for_registration_decision(decision: RegistrationAccessDecision) -> Non
         )
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
-        detail={'code': 'registration_invite_required'},
+        detail={
+            'code': 'registration_invite_required',
+            'message': (
+                'Регистрация только по приглашению. Если у вас уже есть аккаунт, войдите тем же способом, что и раньше.'
+            ),
+        },
     )
 
 
