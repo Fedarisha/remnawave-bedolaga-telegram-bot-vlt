@@ -109,8 +109,8 @@ async def test_invite_denial_includes_support_button_when_contact_is_configured(
     texts = SimpleNamespace(
         language='ru',
         t=lambda key, default=None: {
-            'registration_invite_required': 'invite required',
-            'registration_contact_support': 'Contact support',
+            'REGISTRATION_INVITE_REQUIRED': 'invite required',
+            'REGISTRATION_CONTACT_SUPPORT': 'Contact support',
         }.get(key, default),
     )
     monkeypatch.setattr(
@@ -201,3 +201,36 @@ async def test_already_claimed_gift_is_reported_instead_of_ignored(monkeypatch):
     )
 
     assert 'уже был активирован' in answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'reason',
+    [RegistrationAccessReason.INVITE_REQUIRED, RegistrationAccessReason.CHECK_UNAVAILABLE],
+)
+async def test_invite_denial_uses_real_locale_texts(monkeypatch, reason):
+    """Регрессия: с настоящими локалями отказ не падает с KeyError и берёт тексты из ru.json."""
+    from unittest.mock import AsyncMock
+
+    from app.handlers import start
+    from app.localization.loader import load_locale
+    from app.localization.texts import get_texts
+
+    monkeypatch.setattr(
+        start,
+        'settings',
+        SimpleNamespace(get_support_contact_url=lambda: 'https://telegram.me/support'),
+    )
+    answer = AsyncMock()
+
+    await start._answer_registration_denial(answer, get_texts('ru'), RegistrationAccessDecision(False, reason))
+
+    locale = load_locale('ru')
+    expected = (
+        locale['REGISTRATION_INVITE_REQUIRED']
+        if reason is RegistrationAccessReason.INVITE_REQUIRED
+        else locale['REGISTRATION_CHECK_UNAVAILABLE']
+    )
+    assert answer.await_args.args[0] == expected
+    button = answer.await_args.kwargs['reply_markup'].inline_keyboard[0][0]
+    assert button.text == locale['REGISTRATION_CONTACT_SUPPORT']

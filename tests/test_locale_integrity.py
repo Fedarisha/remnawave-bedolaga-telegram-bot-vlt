@@ -121,9 +121,9 @@ def test_t_calls_with_static_default_exist_in_ru(locales):
 @pytest.mark.parametrize(
     'key',
     [
-        'registration_invite_required',
-        'registration_check_unavailable',
-        'registration_contact_support',
+        'REGISTRATION_INVITE_REQUIRED',
+        'REGISTRATION_CHECK_UNAVAILABLE',
+        'REGISTRATION_CONTACT_SUPPORT',
     ],
 )
 def test_invite_only_keys_exist_in_every_locale(locales, key):

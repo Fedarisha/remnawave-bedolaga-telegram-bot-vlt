@@ -144,13 +144,15 @@ async def _evaluate_telegram_registration_access(
 def _registration_denial_text(texts: Any, decision: RegistrationAccessDecision) -> str:
     if decision.reason is RegistrationAccessReason.CHECK_UNAVAILABLE:
         return texts.t(
-            'registration_check_unavailable',
+            'REGISTRATION_CHECK_UNAVAILABLE',
             'Не удалось проверить приглашение. Повторите попытку позже или обратитесь в поддержку.',
         )
     if decision.reason is RegistrationAccessReason.BLOCKED:
         return texts.t('ACCESS_DENIED')
+    # Ключи локалей загрузчик приводит к верхнему регистру (_normalize_key), поэтому
+    # искать их нужно в UPPER_CASE — в нижнем регистре t() их не находит.
     return texts.t(
-        'registration_invite_required',
+        'REGISTRATION_INVITE_REQUIRED',
         '🔒 Регистрация доступна только по приглашению.\n\n'
         'Используйте действительную пригласительную ссылку или обратитесь в поддержку.',
     )
@@ -168,7 +170,7 @@ async def _answer_registration_denial(
             inline_keyboard=[
                 [
                     types.InlineKeyboardButton(
-                        text=texts.t('registration_contact_support'),
+                        text=texts.t('REGISTRATION_CONTACT_SUPPORT', '💬 Связаться с поддержкой'),
                         url=support_url,
                     )
                 ]
